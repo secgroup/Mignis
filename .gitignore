@@ -1,4 +1,5 @@
 *.pyc
+_*
 
 # OS generated files #
 ######################
