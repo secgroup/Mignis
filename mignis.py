@@ -199,8 +199,10 @@ class Rule:
     def _format_intfip(self, srcdst, direction, params, iponly=False, portonly=False):
         '''Given 'srcdst' (which specifies if we want a source (s) or destination (d) filter type),
         converts the given address (which may be any of: alias, interface, ip, port) to a string ready for filtering in the form
-        '-[io] intf -[ds] ip --[sd]port port'
-        The address is get by using '<direction>_ip', where direction can be any of 'from', 'to' or 'nat'
+        '-[io] intf -[ds] ip --[sd]port port'.
+        The address is get by using '<direction>_ip', where direction can be any of 'from', 'to' or 'nat'.
+        If iponly is specified, an IP address is returned instead of an interface.
+        If portonly is specified, no interface/ip filters are added.
         '''
         intf_alias = '{0}_alias'.format(direction)
         intf = '{0}_intf'.format(direction)
@@ -220,7 +222,8 @@ class Rule:
                 else:
                     r = '-{0} {1}'.format(srcdst, params[ip])
             elif iponly:
-                # We need to return an IP address, so we have to return the subnet
+                # We need to return an IP address instead of the interface,
+                # but since no IP was explicitly specified, we have to return the subnet
                 subnet = self.iptht.intf[params[intf_alias]][1]
                 r = '-{0} {1}'.format(srcdst, str(subnet))
             elif params[intf]:
@@ -344,7 +347,7 @@ class Rule:
         params_b = self.params
 
         # If b has filters, rules don't overlap.
-        # TODO: this is not as easy, we should improve the matching here
+        # TODO: this is not so easy, we should improve the matching here
         if params_b['filters'] != '':
             return False
 
@@ -526,12 +529,18 @@ class Rule:
         rules.extend(self._dbl_forward_er(params))
         params['filters'] = filters
 
-        params['source'] = self._format_intfip('s', 'from', params)
+        if params['from_alias'] == 'local':
+            params['source'] = self._format_intfip('s', 'from', params, portonly=True)
+            params['chain'] = 'OUTPUT'
+        else:
+            params['source'] = self._format_intfip('s', 'from', params)
+            params['chain'] = 'PREROUTING'
+
         params['destination'] = self._format_intfip('d', 'nat', params, iponly=True)
         params['nat'] = str(params['to_ip'])
         if params['to_port']:
             params['nat'] += ':' + '-'.join(map(str, params['to_port']))
-        rules.append(self.format_rule('-t nat -A PREROUTING {proto} {source} {destination} {filters} -j DNAT --to-destination {nat}', params))
+        rules.append(self.format_rule('-t nat -A {chain} {proto} {source} {destination} {filters} -j DNAT --to-destination {nat}', params))
         return rules
     ##
 
