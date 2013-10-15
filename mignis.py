@@ -20,6 +20,7 @@ import struct
 import pprint
 import argparse
 import traceback
+import string
 
 
 class RuleException(Exception):
@@ -31,27 +32,6 @@ class Rule:
     iptht = None
     # Dictionary with rule parameters
     params = {}
-
-    ## The rule as written in the configuration file
-    #abstract = None
-    ## The type of rule, one of: !, >, <>, >S, >M, >D
-    #rtype = None
-    ## Custom filters for the rule
-    #filters = None
-    ## From/To addresses
-    #from_alias = None
-    #from_intf = None
-    #from_ip = None
-    #from_port = None
-    #to_alias = None
-    #to_intf = None
-    #to_ip = None
-    #to_port = None
-    ## NAT options
-    #nat_alias = None
-    #nat_intf = None
-    #nat_ip = None
-    #nat_port = None
 
     def __init__(self, iptht, abstract_rule, ruletype, r_from, r_to, filters, nat):
         self.iptht = iptht
@@ -71,10 +51,14 @@ class Rule:
         nat_alias, nat_intf, nat_ip, nat_port = self._expand_address(nat) if nat else (None, None, None, None)
 
         self.params = {
+            # The rule as written in the configuration file
             'abstract': abstract_rule,
+            # The type of rule, one of: !, >, <>, >S, >M, >D
             'rtype': ruletype,
+            # Custom filters for the rule
             'filters': filters,
             'protocol': protocol,
+            # From/To addresses
             'from_alias': from_alias,
             'from_intf': from_intf,
             'from_ip': from_ip,
@@ -83,6 +67,7 @@ class Rule:
             'to_intf': to_intf,
             'to_ip': to_ip,
             'to_port': to_port,
+            # NAT options
             'nat_alias': nat_alias,
             'nat_intf': nat_intf,
             'nat_ip': nat_ip,
@@ -91,25 +76,6 @@ class Rule:
 
     def __repr__(self):
         return pprint.pformat(self.params)
-
-    #def get_parameters(self):
-    #    return {
-    #        'abstract' = abstract,
-    #        'rtype' = rtype,
-    #        'filters' = filters,
-    #        'from_alias' = from_alias,
-    #        'from_intf' = from_intf,
-    #        'from_ip' = from_ip,
-    #        'from_port' = from_port,
-    #        'to_alias' = to_alias,
-    #        'to_intf' = to_intf,
-    #        'to_ip' = to_ip,
-    #        'to_port' = to_port,
-    #        'nat_alias' = nat_alias,
-    #        'nat_intf' = nat_intf,
-    #        'nat_ip' = nat_ip,
-    #        'nat_port' = nat_port,
-    #    }
 
     def _check_filters(self, filters):
         '''Verify that some options are not used inside filters.
@@ -918,21 +884,23 @@ class IPTHT:
         self.add_iptables_rule('-A filter_drop -j LOG --log-prefix "DROP-UNK "')
         self.add_iptables_rule('-A filter_drop -j DROP')
 
-    def config_get(self, what, config, split=True):
+    def config_get(self, what, config, split_separator='\s+', split_count=0, split=True):
         '''Read a configuration section. 'what' is the configuration section name,
         while 'config' is the whole configuration as a string.
         Returns a list where each element is a line, and every element is a list
         containing the line splitted by tabs.
         '''
-        r = re.search('{0}\n(.*?)(\n\n+[A-Z]|\n*\Z)+'.format(what), config, re.DOTALL)
+        r = re.search('(.*?)(\n*\Z)', config[what], re.DOTALL)
         if r and r.groups():
             # Get the section contents and split by line
-            r = r.groups()[0].split('\n')
+            r = r.groups()[0].strip().split('\n')
             # Remove comments and empty lines
             r = filter(lambda x: x and x[0] != '#', r)
-            # Split each line by tabs
             if split:
-                r = map(lambda x: re.split('\t+', x), r)
+                # Replace tabs with spaces
+                r = map(lambda x: re.sub('\t+', ' ', x).strip(), r)
+                # Split each line by separator
+                r = map(lambda x: map(string.strip, re.split(split_separator, x, split_count)), r)
             return r
         else:
             return None
@@ -967,9 +935,13 @@ class IPTHT:
     def read_config(self):
         '''Parses the configuration file and populates the rulesdict dictionary
         '''
+
+        # Read the configuration file and split by section
         print("[*] Reading the configuration")
         config = open(self.config_file).read()
-
+        config = re.split('(INTERFACES|ALIASES|FIREWALL|CUSTOM)\n', config)[1:]
+        config = dict(zip(config[::2], config[1::2]))
+        
         # Read the interfaces
         intf = self.config_get('INTERFACES', config)
         for x in intf:
@@ -982,7 +954,7 @@ class IPTHT:
             self.aliases[x[0]] = x[1]
 
         # Read the firewall rules
-        abstract_rules = self.config_get('FIREWALL', config)
+        abstract_rules = self.config_get('FIREWALL', config, '\|', 1)
         self.rulesdict = {
             '!': [],
             '>': [],
@@ -1056,7 +1028,7 @@ class IPTHT:
             pprint.pprint(self.rulesdict, width=200)
         
         # Read the custom rules
-        self.custom = self.config_get('CUSTOM', config, False)
+        self.custom = self.config_get('CUSTOM', config, split=False)
 
 
 # Argument parsing
@@ -1087,7 +1059,7 @@ def main():
         print('\n[!] ' + str(e))
         sys.exit(-1)
     except:
-        print('\n[!] An unexpected error occured!')
+        print('\n[!] An unexpected error occurred!')
         traceback.print_exc()
         sys.exit(-2)
 
@@ -1098,7 +1070,7 @@ def main():
         print('\n[!] ' + str(e))
         sys.exit(-3)
     except:
-        print('\n[!] An unexpected error occured!')
+        print('\n[!] An unexpected error occurred!')
         traceback.print_exc()
         if args['execute_rules']:
             iptht.reset_iptables()

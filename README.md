@@ -72,7 +72,7 @@ lan [.] > ext
 lan ! malicious_host
 
 # dnat to mypc on port 8888
-ext > [router_ext_ip:8888] mypc:8888	-p udp
+ext > [router_ext_ip:8888] mypc:8888 | -p udp
 
 # allow access to port 80 on this machine
 ext > local:80
@@ -83,11 +83,11 @@ CUSTOM
 -A OUTPUT -m state --state ESTABLISHED -j ACCEPT
 ```
 
-Each configuration file needs 4 sections (beware of using the TAB character when specified):
+Each configuration file needs 4 sections:
 
-* **INTERFACES**: defines each interface with their alias (which can be used when writing rules). The syntax is `alias <TAB> interface-name <TAB> subnet`.
-* **ALIASES**: defines aliases for IP addresses. The syntax is `alias <TAB> ip-address`.
-* **FIREWALL**: contains abstract rules. The syntax is `abstract-rule <TAB> iptables-filters`.
+* **INTERFACES**: defines each interface with their alias (which can be used when writing rules). The syntax is `alias interface-name subnet`.
+* **ALIASES**: defines aliases for IP addresses. The syntax is `alias ip-address`.
+* **FIREWALL**: contains abstract rules. The syntax is `abstract-rule | iptables-filters`.
 
 	First we define an *address*, which is either an interface, an alias or an IP address.
 
@@ -120,7 +120,7 @@ Let's see some examples from the configuration above, to clearify how rules can 
 
 		iptables -A FORWARD -i eth0 -d 5.6.7.8 -j DROP
 
-1. ```ext > [router_ext_ip:8888] mypc:8888	-p udp```<br>
+1. ```ext > [router_ext_ip:8888] mypc:8888 | -p udp```<br>
 	UDP packets originating from _ext_ to *router_ext_ip* on port 8888, are DNAT'ed to _mypc_ on port 8888.
 
 		iptables -t mangle -A PREROUTING -p udp -i eth1 -d 10.0.0.2 --dport 8888 -m state --state NEW, INVALID -j DROP
