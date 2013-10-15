@@ -26,7 +26,7 @@ Rules' ordering is fundamental when writing iptables rules. Our approach instead
 
 ### Usage
 ```
-	usage: mignis [-h] -c filename [-d {0,1,2}] [-x] [-n] (-w filename | -e) [-f]
+	usage: mignis.py [-h] -c filename [-d {0,1,2}] [-x] [-n] (-w filename | -e) [-f]
 	
 	A semantic based tool for firewall configuration
 	
