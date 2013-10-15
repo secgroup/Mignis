@@ -47,7 +47,7 @@ Rules can either be written to a file (in a format parsable by the `iptables-res
 
 Usage example:
 ```bash
-./iptables.py -c ex_simple.config -w ex_simple.iptables
+./mignis.py -c ex_simple.config -w ex_simple.iptables
 ```
 
 This will create an *ex_simple.iptables* file from the *ex_simple.config* configuration.
