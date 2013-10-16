@@ -691,15 +691,6 @@ class IPTHT:
         self.wr('# Invalid packets')
         rule = 'drop invalid'
         self.add_iptables_rule('-t mangle -A PREROUTING -m state --state INVALID,UNTRACKED -j DROP', {'abstract': rule})
-        # Allow router to initiate connections
-        #self.wr('# - Router can initiate connections')
-        #rule = 'router can initiate connections to the outside'
-        #self.add_iptables_rule('-A OUTPUT -j ACCEPT', {'abstract': rule})
-        #self.add_iptables_rule('-A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT', {'abstract': rule})
-        # Allow router to be pinged
-        self.wr('# - Router can be pinged')
-        rule = 'router can be pinged'
-        self.add_iptables_rule('-A INPUT -p icmp --icmp-type 8 -j ACCEPT', {'abstract': rule})
         # Allow broadcast traffic
         self.wr('# - Broadcast traffic')
         rule ='allow broadcast traffic'

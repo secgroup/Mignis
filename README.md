@@ -18,9 +18,8 @@ There are many possible ways to write a set of iptables rules for a specific pur
 
 * define each interface and its corresponding subnet.
 * bind the interface to the subnet (on the mangle-prerouting chain). This allows us to specify interfaces and/or IP addresses interchangeably (this is for example exploited in the translation of a masquerade rule).
-* define default policies on the chains we use for filtering
 * give higher priority to deny rules, so that they are placed before any other abstract firewall rule (this has to be kept in mind when writing rules).
-* logging rules useful to analyze mismatched traffic
+* use logging rules to analyze mismatched traffic (which will be dropped).
 
 Rules' ordering is fundamental when writing iptables rules. Our approach instead allows to write a set of abstract **rules** which are **order-independent**.
 
