@@ -28,13 +28,13 @@ class RuleException(Exception):
 
 
 class Rule:
-    # Reference to the IPTHT object
-    iptht = None
+    # Reference to the Mignis object
+    mignis = None
     # Dictionary with rule parameters
     params = {}
 
-    def __init__(self, iptht, abstract_rule, ruletype, r_from, r_to, filters, nat):
-        self.iptht = iptht
+    def __init__(self, mignis, abstract_rule, ruletype, r_from, r_to, filters, nat):
+        self.mignis = mignis
 
         if filters is None:
             filters = ''
@@ -92,7 +92,7 @@ class Rule:
         invalid_option = re.search(check_regexp, filters)
         if invalid_option:
             raise RuleException('Invalid filter specified: {0}.\n'
-                                'You have to use the IPTHT\'s syntax to specify ports.'
+                                'You have to use the Mignis\'s syntax to specify ports.'
                                 .format(invalid_option.groups()[1]))
         check_regexp= ('( |\A)('
                         '-s|--source|-d|--destination|'
@@ -126,13 +126,10 @@ class Rule:
         ipsub, port = addr
         if ipsub == '*':
             alias = intf = ip = None
-        elif ipsub in self.iptht.intf:
+        elif ipsub in self.mignis.intf:
             alias = ipsub
-            intf = self.iptht.intf[ipsub][0]
-            ip = None
-        elif ipsub == 'local':
-            alias = ipsub
-            intf = ip = None
+            intf = self.mignis.intf[ipsub][0]
+            ip = '127.0.0.1' if ipsub == 'local' else None
         else:
             if '/' in ipsub:
                 # It's a custom subnet
@@ -144,20 +141,20 @@ class Rule:
                 #ip = map(IPv4Address, ipsub.split('-'))
                 ip = IPv4Range(ipsub)
                 #if len(ip) != 2:
-                #    raise IPTHTException(self, 'The range "{0}" is invalid.'.format(ipsub))
+                #    raise MignisException(self, 'The range "{0}" is invalid.'.format(ipsub))
             else:
                 ip = IPv4Address(ipsub)
                 alias = self.ip2subnet(ip)
                 if alias is None:
-                    raise IPTHTException(self, 'The IP address "{0}" does not belong to any subnet.'.format(ipsub))
-                intf = self.iptht.intf[alias][0]
+                    raise MignisException(self, 'The IP address "{0}" does not belong to any subnet.'.format(ipsub))
+                intf = self.mignis.intf[alias][0]
         return (alias, intf, ip, port)
 
     def ip2subnet(self, ip):
         '''Returns the subnet the ip is in, or None if not found
         '''
-        for subnet in self.iptht.intf:
-            if ip in self.iptht.intf[subnet][1]:
+        for subnet in self.mignis.intf:
+            if ip in self.mignis.intf[subnet][1]:
                 return subnet
         else:
             return None
@@ -178,9 +175,7 @@ class Rule:
 
         r = ''
         if not portonly:
-            if params[intf_alias] == 'local':
-                r = '-{0} lo'.format(io)
-            elif params[ip]:
+            if params[ip]:
                 # If there is an IP, we use that instead of the interface as it's more specific
                 if isinstance(params[ip], IPv4Range):
                     srcdst_long = 'src' if srcdst == 's' else 'dst'
@@ -190,7 +185,7 @@ class Rule:
             elif iponly:
                 # We need to return an IP address instead of the interface,
                 # but since no IP was explicitly specified, we have to return the subnet
-                subnet = self.iptht.intf[params[intf_alias]][1]
+                subnet = self.mignis.intf[params[intf_alias]][1]
                 r = '-{0} {1}'.format(srcdst, str(subnet))
             elif params[intf]:
                 # If there is no IP, we use the interface
@@ -238,7 +233,7 @@ class Rule:
             for rule in rulesdict['>']:
                 if (rule.params['from_intf'] == params['from_intf'] and
                         rule.params['to_intf'] == params['nat_intf']):
-                   self.iptht.warning('Forward and NAT rules collision:\n- {0}\n- {1}\n'
+                   self.mignis.warning('Forward and NAT rules collision:\n- {0}\n- {1}\n'
                                 .format(rule.params['abstract'], params['abstract']))
             # TODO: should we check ports? otherwise isn't this warning too broad?
 
@@ -482,12 +477,12 @@ class Rule:
         '''
         rules = []
         if re.search('(^| )-m state ', params['filters']):
-            self.iptht.warning('Inspectioning the state in DNAT might corrupt the rule.' +
+            self.mignis.warning('Inspectioning the state in DNAT might corrupt the rule.' +
                 'Use it only if you know what you\'re doing.\n- {0}'.format(params['abstract']))
 
         params['source'] = self._format_intfip('s', 'from', params)
-        params['destination'] = self._format_intfip('d', 'to', params)
-        rules.append(self.format_rule('-t mangle -A PREROUTING {proto} {source} {destination} {filters} -m state --state NEW,INVALID -j DROP', params))
+        params['destination'] = self._format_intfip('d', 'to', params, iponly=True)
+        rules.append(self.format_rule('-t mangle -A PREROUTING {proto} {source} {destination} {filters} -m state --state NEW -j DROP', params))
 
         # Forward rules without filters
         filters = params['filters']
@@ -511,17 +506,17 @@ class Rule:
     ##
 
 
-class IPTHTException(Exception):
-    def __init__(self, iptht, message):
+class MignisException(Exception):
+    def __init__(self, mignis, message):
         Exception.__init__(self, message)
-        #iptht.reset_iptables(False)
+        #mignis.reset_iptables(False)
 
 
-class IPTHTConfigException(Exception):
+class MignisConfigException(Exception):
     pass
 
 
-class IPTHT:
+class Mignis:
     old_rules = []
 
     '''
@@ -555,13 +550,13 @@ class IPTHT:
     def execute(self, cmd):
         '''Execute the command s only if we are not in dryrun mode
         '''
-        # TODO: use subprocess in place of system
+        # TODO: use subprocess.check_call with try/except in place of system
         if not self.dryrun:
             ret = os.system(cmd)
             if ret:
-                raise IPTHTException(self, 'Command execution error (code: {0}).'.format(ret))
+                raise MignisException(self, 'Command execution error (code: {0}).'.format(ret))
 
-    def execute_rules(self):
+    def exec_rules(self):
         if self.dryrun: return
         for rule in self.iptables_rules:
             self.execute('iptables ' + rule)
@@ -570,7 +565,7 @@ class IPTHT:
         if self.dryrun: return
 
         if not self.force and os.path.exists(filename):
-            raise IPTHTException(self, 'The file already exists, use -f to overwrite.')
+            raise MignisException(self, 'The file already exists, use -f to overwrite.')
 
         f = open(filename, 'w')
 
@@ -606,7 +601,7 @@ class IPTHT:
                 print('\n[*] Rules written.')
             else:
                 if self.force:
-                    self.execute_rules()
+                    self.exec_rules()
                     print('\n[*] Rules executed.')
                 else:
                     execute = ''
@@ -614,7 +609,7 @@ class IPTHT:
                     while execute not in ['y', 'n']:
                         execute = raw_input('Execute the rules? [y|n]: ').lower()
                     if execute == 'y':
-                        self.execute_rules()
+                        self.exec_rules()
                         print('[*] Rules executed.')
                     else:
                         print('[!] Rules NOT executed.')
@@ -631,7 +626,7 @@ class IPTHT:
         if self.dryrun:
             print('Skipped (dryrun mode)')
             return
-        self.execute('''cat << EOF | iptables-restore
+        reset_cmd = '''cat << EOF | iptables-restore
             *filter
             :INPUT ACCEPT
             :FORWARD ACCEPT
@@ -649,7 +644,9 @@ class IPTHT:
             :OUTPUT ACCEPT
             :POSTROUTING ACCEPT
             COMMIT
-            EOF'''.replace('\t', ''))
+            EOF'''
+        x = re.compile("^\s+", re.MULTILINE)
+        self.execute(x.sub('', reset_cmd))
 
     def add_iptables_rule(self, r, params=None):
         if params:
@@ -798,16 +795,11 @@ class IPTHT:
                     other_subnet, other_ip = self.intf[other_ipsub]
                     params['ip'] = other_ip
                     self.add_iptables_rule('-t mangle -A PREROUTING -i {subnet} -s {ip} -j DROP', params)
-                # Localhost deny rule
-                params['ip'] = '127.0.0.0/8'
-                self.add_iptables_rule('-t mangle -A PREROUTING -i {subnet} -s {ip} -j DROP', params)
                 # Accept rule for all other IPs
                 self.add_iptables_rule('-t mangle -A PREROUTING -i {subnet} -j ACCEPT', params)
             else:
                 params = {'subnet': subnet, 'ip': ip, 'abstract': 'bind ip {0} to intf {1}'.format(ip, subnet)}
                 self.add_iptables_rule('-t mangle -A PREROUTING -i {subnet} -s {ip} -j ACCEPT', params)
-        # Localhost rule
-        self.add_iptables_rule('-t mangle -A PREROUTING -i lo -s 127.0.0.0/8 -j ACCEPT', {'abstract': 'bind 127.0.0.0/8 to intf localhost'})
 
     def custom_rules(self):
         '''Custom rules are executed verbatim.
@@ -905,7 +897,7 @@ class IPTHT:
         # Split ip and ports
         r = s.split(':')
         if len(r) > 2:
-            raise IPTHTConfigException('invalid host:port parameter.')
+            raise MignisConfigException('invalid host:port parameter.')
 
         # Convert aliases
         if r[0] in self.aliases:
@@ -919,7 +911,7 @@ class IPTHT:
             if (len(ports) > 2 or
                     ports[0] < 0 or ports[0] > 65535 or
                     (len(ports) == 2 and (ports[1] < 0 or ports[1] > 65535 or ports[0] > ports[1]))):
-                raise IPTHTConfigException('invalid port range.')
+                raise MignisConfigException('invalid port range.')
             r[1] = ports
         return r
 
@@ -937,6 +929,7 @@ class IPTHT:
         intf = self.config_get('INTERFACES', config)
         for x in intf:
             self.intf[x[0]] = (x[1], IPv4Network(x[2], strict=True))
+        self.intf['local'] = ('lo', IPv4Network('127.0.0.0/8', strict=True))
         
         # Read the aliases
         aliases_list = self.config_get('ALIASES', config)
@@ -961,15 +954,15 @@ class IPTHT:
 
             rule = re.search('^(.*?) *(\[.*?\])? (!|>|<>) (\[.*?\])? *(.*?)$', rule)
             if not rule:
-                raise IPTHTException(self, 'Error in configuration file: bad firewall rule.')
+                raise MignisException(self, 'Error in configuration file: bad firewall rule.')
             rule = rule.groups()
 
             (r_from, r_nat_left, ruletype, r_nat_right, r_to) = rule
             try:
                 r_from = self.config_split_ipport(r_from)
                 r_to = self.config_split_ipport(r_to)
-            except IPTHTConfigException as e:
-                raise IPTHTException(self, 'Error in configuration file: ' + str(e))
+            except MignisConfigException as e:
+                raise MignisException(self, 'Error in configuration file: ' + str(e))
             
             '''This should not be needed
             # Find and replace aliases inside params
@@ -987,7 +980,7 @@ class IPTHT:
                     r = Rule(self, abstract_rule, ruletype, r_from, r_to, params, None)
                 elif ruletype == '>':
                     if r_nat_left and r_nat_right:
-                        raise IPTHTException(self, 'Bad firewall rule in configuration file.')
+                        raise MignisException(self, 'Bad firewall rule in configuration file.')
 
                     if r_nat_left:
                         # SNAT
@@ -1009,9 +1002,9 @@ class IPTHT:
                         # Forward
                         r = Rule(self, abstract_rule, ruletype, r_from, r_to, params, None)
                 else:
-                    raise IPTHTException(self, 'Bad firewall rule in configuration file.')
+                    raise MignisException(self, 'Bad firewall rule in configuration file.')
             except RuleException as e:
-                raise IPTHTException(self, 'Error in configuration file:\n' + str(e))
+                raise MignisException(self, 'Error in configuration file:\n' + str(e))
 
             self.rulesdict[ruletype].append(r)
         
@@ -1043,10 +1036,10 @@ def main():
     args = parse_args()
 
     try:
-        iptht = IPTHT(args['config_file'], args['default_rules'], args['debug'], args['force'], args['dryrun'], args['write_rules_filename'], args['execute_rules'])
+        mignis = Mignis(args['config_file'], args['default_rules'], args['debug'], args['force'], args['dryrun'], args['write_rules_filename'], args['execute_rules'])
         if args['execute_rules']:
-            iptht.reset_iptables()
-    except IPTHTException as e:
+            mignis.reset_iptables()
+    except MignisException as e:
         print('\n[!] ' + str(e))
         sys.exit(-1)
     except:
@@ -1055,16 +1048,16 @@ def main():
         sys.exit(-2)
 
     try:
-        iptht.all_rules()
-        iptht.apply_rules()
-    except IPTHTException as e:
+        mignis.all_rules()
+        mignis.apply_rules()
+    except MignisException as e:
         print('\n[!] ' + str(e))
         sys.exit(-3)
     except:
         print('\n[!] An unexpected error occurred!')
         traceback.print_exc()
         if args['execute_rules']:
-            iptht.reset_iptables()
+            mignis.reset_iptables()
         sys.exit(-4)
 
     print('\n[*] Done.')
