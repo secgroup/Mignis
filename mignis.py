@@ -129,7 +129,7 @@ class Rule:
         elif ipsub in self.mignis.intf:
             alias = ipsub
             intf = self.mignis.intf[ipsub][0]
-            ip = '127.0.0.1' if ipsub == 'local' else None
+            ip = IPv4Address('127.0.0.1') if ipsub == 'local' else None
         else:
             if '/' in ipsub:
                 # It's a custom subnet
@@ -185,8 +185,11 @@ class Rule:
             elif iponly:
                 # We need to return an IP address instead of the interface,
                 # but since no IP was explicitly specified, we have to return the subnet
-                subnet = self.mignis.intf[params[intf_alias]][1]
-                r = '-{0} {1}'.format(srcdst, str(subnet))
+                if params[intf_alias]:
+                    subnet = self.mignis.intf[params[intf_alias]][1]
+                    r = '-{0} {1}'.format(srcdst, str(subnet))
+                else:
+                    r = ''
             elif params[intf]:
                 # If there is no IP, we use the interface
                 r = '-{0} {1}'.format(io, params[intf])
@@ -377,7 +380,7 @@ class Rule:
 
         if params['from_alias'] == 'local' and params['to_alias'] == 'local':
             # OUTPUT and INPUT rule (this is the "local > local" case)
-            # TODO: we can avoid this and use the same code as 'from_alias', so with the established,related
+            # TODO: we can avoid this and use the same code as 'from_alias', so by exploiting the generic "established,related" rule
             # but as we know how to do it without it, maybe it's better? We should think about it.
             params['source'] = self._format_intfip('s', dir1, params, portonly=True)
             params['destination'] = self._format_intfip('d', dir2, params)
@@ -387,40 +390,29 @@ class Rule:
             rules.append(self.format_rule('-A INPUT {proto} {source} {destination} {filters} -j ACCEPT', params))
         elif params['from_alias'] == 'local':
             # OUTPUT rule
-            params['source'] = self._format_intfip('s', dir1, params, portonly=True)
-            params['destination'] = self._format_intfip('d', dir2, params)
             if flip:
-                rules.append(self.format_rule('-A OUTPUT {proto} {source} {destination} -m state --state ESTABLISHED,RELATED -j ACCEPT', params))
-            else:
-                rules.append(self.format_rule('-A OUTPUT {proto} {source} {destination} {filters} -j ACCEPT', params))
-            params['source'] = self._format_intfip('s', dir2, params)
-            params['destination'] = self._format_intfip('d', dir1, params, portonly=True)
-            if flip:
+                params['source'] = self._format_intfip('s', dir2, params)
+                params['destination'] = self._format_intfip('d', dir1, params, portonly=True)
                 rules.append(self.format_rule('-A INPUT {proto} {source} {destination} {filters} -j ACCEPT', params))
             else:
-                rules.append(self.format_rule('-A INPUT {proto} {source} {destination} -m state --state ESTABLISHED,RELATED -j ACCEPT', params))
+                params['source'] = self._format_intfip('s', dir1, params, portonly=True)
+                params['destination'] = self._format_intfip('d', dir2, params)
+                rules.append(self.format_rule('-A OUTPUT {proto} {source} {destination} {filters} -j ACCEPT', params))
         elif params['to_alias'] == 'local':
             # INPUT rule
-            params['source'] = self._format_intfip('s', dir1, params)
-            params['destination'] = self._format_intfip('d', dir2, params, portonly=True)
             if flip:
-                rules.append(self.format_rule('-A INPUT {proto} {source} {destination} -m state --state ESTABLISHED,RELATED -j ACCEPT', params))
-            else:
-                rules.append(self.format_rule('-A INPUT {proto} {source} {destination} {filters} -j ACCEPT', params))
-            params['source'] = self._format_intfip('s', dir2, params, portonly=True)
-            params['destination'] = self._format_intfip('d', dir1, params)
-            if flip:
+                params['source'] = self._format_intfip('s', dir2, params, portonly=True)
+                params['destination'] = self._format_intfip('d', dir1, params)
                 rules.append(self.format_rule('-A OUTPUT {proto} {source} {destination} {filters} -j ACCEPT', params))
             else:
-                rules.append(self.format_rule('-A OUTPUT {proto} {source} {destination} -m state --state ESTABLISHED,RELATED -j ACCEPT', params))
+                params['source'] = self._format_intfip('s', dir1, params)
+                params['destination'] = self._format_intfip('d', dir2, params, portonly=True)
+                rules.append(self.format_rule('-A INPUT {proto} {source} {destination} {filters} -j ACCEPT', params))
         else:
             # FORWARD rule
             params['source'] = self._format_intfip('s', dir1, params)
             params['destination'] = self._format_intfip('d', dir2, params)
             rules.append(self.format_rule('-A FORWARD {proto} {source} {destination} {filters} -j ACCEPT', params))
-            params['source'] = self._format_intfip('s', dir2, params)
-            params['destination'] = self._format_intfip('d', dir1, params)
-            rules.append(self.format_rule('-A FORWARD {proto} {source} {destination} -m state --state ESTABLISHED,RELATED -j ACCEPT', params))
         return rules
 
     def _dbl_forward(self, params):
@@ -660,6 +652,7 @@ class Mignis:
         '''
         print('\n[*] Building rules')
         self.policies()
+        self.mandatory_rules()
         if self.insert_default_rules:
             self.default_rules()
         self.firewall_rules()
@@ -667,6 +660,16 @@ class Mignis:
         self.custom_rules()
         self.log_rules()
     
+    def mandatory_rules(self):
+        '''Rules needed for the model to work.
+        At this moment we only require an ESTABLISHED,RELATED
+        rule on every chain in filter.
+        '''
+        self.wr('\n# Mandatory rules')
+        self.add_iptables_rule('-A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT')
+        self.add_iptables_rule('-A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT')
+        self.add_iptables_rule('-A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT')
+
     def policies(self):
         '''Default policies for input/forward/output in filter and prerouting in mangle
         '''
@@ -685,7 +688,7 @@ class Mignis:
         rule = 'loopback'
         self.add_iptables_rule('-A INPUT -i lo -j ACCEPT', {'abstract': rule})
         # Drop invalid packets
-        self.wr('# Invalid packets')
+        self.wr('# - Invalid packets')
         rule = 'drop invalid'
         self.add_iptables_rule('-t mangle -A PREROUTING -m state --state INVALID,UNTRACKED -j DROP', {'abstract': rule})
         # Allow broadcast traffic
@@ -694,6 +697,7 @@ class Mignis:
         self.add_iptables_rule('-A INPUT -s 0.0.0.0 -d 255.255.255.255 -j ACCEPT', {'abstract': rule})
         self.add_iptables_rule('-t mangle -A PREROUTING -s 0.0.0.0 -d 255.255.255.255 -j ACCEPT', {'abstract': rule})
         # We don't allow packets to go out from the same interface they came in
+        self.wr('# - Same-interface packets')
         for ipsub in self.intf.iterkeys():
             self.add_iptables_rule('-A FORWARD -i {intf} -o {intf} -j DROP',
                                     {'intf': self.intf[ipsub][0], 'abstract': 'drop same-interface packets'})
@@ -897,7 +901,7 @@ class Mignis:
         # Split ip and ports
         r = s.split(':')
         if len(r) > 2:
-            raise MignisConfigException('invalid host:port parameter.')
+            raise MignisConfigException('invalid host:port parameter "{0}".'.format(s))
 
         # Convert aliases
         if r[0] in self.aliases:
@@ -954,7 +958,7 @@ class Mignis:
 
             rule = re.search('^(.*?) *(\[.*?\])? (!|>|<>) (\[.*?\])? *(.*?)$', rule)
             if not rule:
-                raise MignisException(self, 'Error in configuration file: bad firewall rule.')
+                raise MignisException(self, 'Error in configuration file: bad firewall rule "{0}".'.format(rule))
             rule = rule.groups()
 
             (r_from, r_nat_left, ruletype, r_nat_right, r_to) = rule

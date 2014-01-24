@@ -1,7 +1,7 @@
 #!/usr/bin/python
 
 from ipaddr import *
-from ipaddr import _BaseV4, _BaseNet, _IPAddrBase
+from ipaddr import _BaseV4, _BaseIP, _BaseNet, _IPAddrBase
 
 
 class _BaseRange(_IPAddrBase):
@@ -122,13 +122,14 @@ class _BaseRange(_IPAddrBase):
         if isinstance(other, _BaseNet):
             return (self._ip_from <= int(other.network) and
                     self._ip_to >= int(other.broadcast))
+        # dealing with another range
         elif isinstance(other, _BaseRange):
             return (self._ip_from <= other._ip_from and
                     self._ip_to >= other._ip_to)
         # dealing with another address
-        else:
-            return (int(self.network) <= int(other._ip) <=
-                    int(self.broadcast))
+        else: # _BaseIP
+            return (int(self._ip_from) <= int(other._ip) <=
+                    int(self._ip_to))
 
     def overlaps(self, other):
         """Tell if self is partly contained in other."""
