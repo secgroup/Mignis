@@ -21,6 +21,7 @@ import pprint
 import argparse
 import traceback
 import string
+from itertools import product
 
 
 class RuleException(Exception):
@@ -951,10 +952,25 @@ class Mignis:
             '>M': [],
             '>D': [],
         }
+
+        # Expand lists inside each abstract_rule.
+        # At the moment we don't expand params.
+        expanded_abstract_rules = []
         for abstract_rule in abstract_rules:
             rule = abstract_rule[0]
-            params = abstract_rule[1] if len(abstract_rule) > 1 else None
-            abstract_rule = ' '.join(abstract_rule)
+            params = abstract_rule[1] if len(abstract_rule) > 1 else ''
+
+            # Create a list of lists, splitting on ", *" for each list found.
+            # Each list is written using "(item1, item2, ...)".
+            rule = map(lambda x: re.split(', *', x), filter(None, re.split('[()]', rule)))
+
+            for single_rule in product(*rule):
+                single_rule = ''.join(single_rule)
+                expanded_abstract_rules.append([single_rule, params])
+        
+        for abstract_rule in expanded_abstract_rules:
+            rule, params = abstract_rule
+            abstract_rule = ' '.join(abstract_rule).strip()
 
             rule = re.search('^(.*?) *(\[.*?\])? (!|>|<>) (\[.*?\])? *(.*?)$', rule)
             if not rule:
@@ -962,19 +978,18 @@ class Mignis:
             rule = rule.groups()
 
             (r_from, r_nat_left, ruletype, r_nat_right, r_to) = rule
+
             try:
                 r_from = self.config_split_ipport(r_from)
                 r_to = self.config_split_ipport(r_to)
             except MignisConfigException as e:
                 raise MignisException(self, 'Error in configuration file: ' + str(e))
             
-            '''This should not be needed
             # Find and replace aliases inside params
             if params:
                 for alias, val in self.aliases.iteritems():
                     params = re.sub('(?<={0}){1}(?={0})'.format('[^a-zA-Z0-9\-_]', alias), val, params)
-            '''
-
+            
             try:
                 if ruletype == '!':
                     # Deny
