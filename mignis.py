@@ -54,7 +54,7 @@ class Rule:
         self.params = {
             # The rule as written in the configuration file
             'abstract': abstract_rule,
-            # The type of rule, one of: !, >, <>, >S, >M, >D
+            # The type of rule, one of: /, //, >, <>, >S, >M, >D
             'rtype': ruletype,
             # Custom filters for the rule
             'filters': filters,
@@ -210,8 +210,10 @@ class Rule:
             return self._dbl_forward_er(params)
         elif self.params['rtype'] == '<>':
             return self._dbl_forward(params)
-        elif self.params['rtype'] == '!':
+        elif self.params['rtype'] == '/':
             return self._forward_deny(params)
+        elif self.params['rtype'] == '//':
+            return self._forward_deny(params, reject=True)
         elif self.params['rtype'] == '>M':
             return self._snat(params, masquerade=True)
         elif self.params['rtype'] == '>S':
@@ -424,27 +426,30 @@ class Rule:
         rules.extend(self._dbl_forward_er(params, flip=True))
         return rules
 
-    def _forward_deny(self, params):
-        '''Translation for "!"
+    def _forward_deny(self, params, reject=False):
+        '''Translation for "/" and "//"
         '''
         rules = []
 
+        target = 'REJECT' if reject else 'DROP'
         if params['from_alias'] == 'local':
             # OUTPUT rule
-            # this also matches the "local ! local" rule
+            # this also matches the "local / local" rule
             params['source'] = self._format_intfip('s', 'from', params, portonly=True)
             params['destination'] = self._format_intfip('d', 'to', params)
-            rules.append(self.format_rule('-A OUTPUT {proto} {source} {destination} {filters} -j DROP', params))
+            chain = 'OUTPUT'
         elif params['to_alias'] == 'local':
             # INPUT rule
             params['source'] = self._format_intfip('s', 'from', params)
             params['destination'] = self._format_intfip('d', 'to', params, portonly=True)
-            rules.append(self.format_rule('-A INPUT {proto} {source} {destination} {filters} -j DROP', params))
+            chain = 'INPUT'
         else:
             # FORWARD rule
             params['source'] = self._format_intfip('s', 'from', params)
             params['destination'] = self._format_intfip('d', 'to', params)
-            rules.append(self.format_rule('-A FORWARD {proto} {source} {destination} {filters} -j DROP', params))
+            chain = 'FORWARD'
+        rules.append(self.format_rule('-A ' + chain + ' {proto} {source} {destination} {filters} -j ' + target, params))
+
         return rules
 
     def _snat(self, params, masquerade=False):
@@ -713,7 +718,7 @@ class Mignis:
 
         # Cycle over the dictionary using a specific order (deny rules are first)
         # and add them to iptables
-        for ruletype in ['!', '<>', '>', '>D', '>M', '>S']:
+        for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S']:
             for rule in self.rulesdict[ruletype]:
                 # Debugging info
                 if self.debug >= 2:
@@ -746,7 +751,8 @@ class Mignis:
         "rules" is the dictionary containing lists of Rule objects.
         '''
         new_rules = {
-            '!': [],
+            '/': [],
+            '//': [],
             '>': [],
             '<>': [],
             '>S': [],
@@ -755,13 +761,13 @@ class Mignis:
         }
 
         # No optimizations at the moment.
-        for ruletype in ['!', '<>', '>', '>D', '>M', '>S']:
+        for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S']:
             for r in rules[ruletype]:
                 new_rules[ruletype].append(r)
         
         '''
             # Remove duplicated rules and merge their abstract
-                for ruletype in ['!', '<>', '>', '>D', '>M', '>S']:
+                for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S']:
                     for r in rules[ruletype]:
                         print r.get_iptables_rules(rules)
                         # If we can find a matching rule in new_rules (x), it means
@@ -916,7 +922,7 @@ class Mignis:
             if (len(ports) > 2 or
                     ports[0] < 0 or ports[0] > 65535 or
                     (len(ports) == 2 and (ports[1] < 0 or ports[1] > 65535 or ports[0] > ports[1]))):
-                raise MignisConfigException('invalid port range.')
+                raise MignisConfigException('invalid port range "{0}".'.format(ports))
             r[1] = ports
         return r
 
@@ -945,7 +951,8 @@ class Mignis:
         # Read the firewall rules
         abstract_rules = self.config_get('FIREWALL', config, '\|', 1)
         self.rulesdict = {
-            '!': [],
+            '/': [],
+            '//': [],
             '>': [],
             '<>': [],
             '>S': [],
@@ -953,80 +960,82 @@ class Mignis:
             '>D': [],
         }
 
-        # Expand lists inside each abstract_rule.
-        # At the moment we don't expand params.
-        expanded_abstract_rules = []
+        # Expand lists inside each abstract_rule and add each expanded rule
+        # (at the moment we don't expand params)
         for abstract_rule in abstract_rules:
+            if self.debug >= 3:
+                print('Expanding rule {0}'.format(abstract_rule))
+
             rule = abstract_rule[0]
             params = abstract_rule[1] if len(abstract_rule) > 1 else ''
 
             # Create a list of lists, splitting on ", *" for each list found.
             # Each list is written using "(item1, item2, ...)".
-            rule = map(lambda x: re.split(', *', x), filter(None, re.split('[()]', rule)))
+            rules = map(lambda x: re.split(', *', x), filter(None, re.split('[()]', rule)))
 
-            for single_rule in product(*rule):
-                single_rule = ''.join(single_rule)
-                expanded_abstract_rules.append([single_rule, params])
-        
-        for abstract_rule in expanded_abstract_rules:
-            rule, params = abstract_rule
-            abstract_rule = ' '.join(abstract_rule).strip()
+            # Add each expanded rule
+            for rule in product(*rules):
+                rule = ''.join(rule)
+                if self.debug >= 3:
+                    print("    expanded rule: {0}".format([rule, params]))
 
-            rule = re.search('^(.*?) *(\[.*?\])? (!|>|<>) (\[.*?\])? *(.*?)$', rule)
-            if not rule:
-                raise MignisException(self, 'Error in configuration file: bad firewall rule "{0}".'.format(rule))
-            rule = rule.groups()
+                abstract_rule = (rule + ' ' + params).strip()
 
-            (r_from, r_nat_left, ruletype, r_nat_right, r_to) = rule
+                rule = re.search('^(.*?) *(\[.*?\])? (/|//|>|<>) (\[.*?\])? *(.*?)$', rule)
+                if not rule:
+                    raise MignisException(self, 'Error in configuration file: bad firewall rule "{0}".'.format(rule))
+                rule = rule.groups()
 
-            try:
-                r_from = self.config_split_ipport(r_from)
-                r_to = self.config_split_ipport(r_to)
-            except MignisConfigException as e:
-                raise MignisException(self, 'Error in configuration file: ' + str(e))
-            
-            # Find and replace aliases inside params
-            if params:
-                for alias, val in self.aliases.iteritems():
-                    params = re.sub('(?<={0}){1}(?={0})'.format('[^a-zA-Z0-9\-_]', alias), val, params)
-            
-            try:
-                if ruletype == '!':
-                    # Deny
-                    r = Rule(self, abstract_rule, ruletype, r_from, r_to, params, None)
-                elif ruletype == '<>':
-                    # Forward
-                    r = Rule(self, abstract_rule, ruletype, r_from, r_to, params, None)
-                elif ruletype == '>':
-                    if r_nat_left and r_nat_right:
-                        raise MignisException(self, 'Bad firewall rule in configuration file.')
+                (r_from, r_nat_left, ruletype, r_nat_right, r_to) = rule
 
-                    if r_nat_left:
-                        # SNAT
-                        if r_nat_left == '[.]':
-                            # Masquerade
-                            ruletype = '>M'
-                            r = Rule(self, abstract_rule, ruletype, r_from, r_to, params, None)
-                        else:
-                            # Classic SNAT
-                            ruletype = '>S'
-                            nat = self.config_split_ipport(r_nat_left[1:-1])
-                            r = Rule(self, abstract_rule, ruletype, r_from, r_to, params, nat)
-                    elif r_nat_right:
-                        # DNAT
-                        ruletype = '>D'
-                        nat = self.config_split_ipport(r_nat_right[1:-1])
-                        r = Rule(self, abstract_rule, ruletype, r_from, r_to, params, nat)
-                    else:
+                try:
+                    r_from = self.config_split_ipport(r_from)
+                    r_to = self.config_split_ipport(r_to)
+                except MignisConfigException as e:
+                    raise MignisException(self, 'Error in configuration file: ' + str(e))
+                
+                # Find and replace aliases inside params
+                if params:
+                    for alias, val in self.aliases.iteritems():
+                        params = re.sub('(?<={0}){1}(?={0})'.format('[^a-zA-Z0-9\-_]', alias), val, params)
+                
+                try:
+                    if ruletype in ['/', '//']:
+                        # Deny
+                        r = Rule(self, abstract_rule, ruletype, r_from, r_to, params, None)
+                    elif ruletype == '<>':
                         # Forward
                         r = Rule(self, abstract_rule, ruletype, r_from, r_to, params, None)
-                else:
-                    raise MignisException(self, 'Bad firewall rule in configuration file.')
-            except RuleException as e:
-                raise MignisException(self, 'Error in configuration file:\n' + str(e))
+                    elif ruletype == '>':
+                        if r_nat_left and r_nat_right:
+                            raise MignisException(self, 'Bad firewall rule in configuration file.')
 
-            self.rulesdict[ruletype].append(r)
-        
+                        if r_nat_left:
+                            # SNAT
+                            if r_nat_left == '[.]':
+                                # Masquerade
+                                ruletype = '>M'
+                                r = Rule(self, abstract_rule, ruletype, r_from, r_to, params, None)
+                            else:
+                                # Classic SNAT
+                                ruletype = '>S'
+                                nat = self.config_split_ipport(r_nat_left[1:-1])
+                                r = Rule(self, abstract_rule, ruletype, r_from, r_to, params, nat)
+                        elif r_nat_right:
+                            # DNAT
+                            ruletype = '>D'
+                            nat = self.config_split_ipport(r_nat_right[1:-1])
+                            r = Rule(self, abstract_rule, ruletype, r_from, r_to, params, nat)
+                        else:
+                            # Forward
+                            r = Rule(self, abstract_rule, ruletype, r_from, r_to, params, None)
+                    else:
+                        raise MignisException(self, 'Bad firewall rule in configuration file.')
+                except RuleException as e:
+                    raise MignisException(self, 'Error in configuration file:\n' + str(e))
+
+                self.rulesdict[ruletype].append(r)
+            
         if self.debug >= 2:
             pprint.pprint(self.rulesdict, width=200)
         
@@ -1041,7 +1050,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='A semantic based tool for firewall configuration', add_help=False)
     parser.add_argument('-h', action='help', help='show this help message and exit')
     parser.add_argument('-c', dest='config_file', metavar='filename', help='configuration file', required=True)
-    parser.add_argument('-d', dest='debug', help='set debugging output level (0-2)', required=False, type=int, default=0, choices=range(3))
+    parser.add_argument('-d', dest='debug', help='set debugging output level (0-2)', required=False, type=int, default=0, choices=range(4))
     parser.add_argument('-x', dest='default_rules', help='do not insert default rules', required=False, action='store_false')
     parser.add_argument('-n', dest='dryrun', help='do not execute the rules (dryrun)', required=False, action='store_true')
     group_exec = parser.add_mutually_exclusive_group(required=True)

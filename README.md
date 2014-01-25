@@ -68,7 +68,7 @@ FIREWALL
 lan [.] > ext
 
 # forbid the communication with a malicious host
-lan ! malicious_host
+lan / malicious_host
 
 # dnat to mypc on port 8888
 ext > [router_ext_ip:8888] mypc:8888 | -p udp
@@ -96,7 +96,7 @@ Each configuration file needs 4 sections:
 	* *from* and *to* are addresses,
 	* *source_nat* is the address *from* will be SNAT'ed to (it's possible to use "." to indicate a masquerade),
 	* *dest_nat* is the address *to* will be DNAT'ed to,
-	* *opt* is one of: "!" (deny), ">" (one-way forward), "<>" (two-way forward)
+	* *opt* is one of: "/" (deny with DROP), "//" (deny with REJECT), ">" (one-way forward), "<>" (two-way forward)
 
 	Finally an *iptables filter* is any iptables option used for filtering packets.<br>
 	Common options may be "-p udp", "-p tcp", "-p icmp --icmp-type echo-reply", etc.
@@ -114,7 +114,7 @@ Let's see some examples from the configuration above, to clearify how rules can 
 		iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o eth1 -j MASQUERADE
 		
 
-1. ```lan ! malicious_host```<br>
+1. ```lan / malicious_host```<br>
 	Forbids the communication from the _lan_ towards a *malicious host*.
 
 		iptables -A FORWARD -i eth0 -d 5.6.7.8 -j DROP
