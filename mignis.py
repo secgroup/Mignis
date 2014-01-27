@@ -719,7 +719,7 @@ class Mignis:
 
         # Cycle over the dictionary using a specific order (deny rules are first)
         # and add them to iptables
-        for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S']:
+        for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S', '{']:
             for rule in self.fw_rulesdict[ruletype]:
                 # Debugging info
                 if self.debug >= 2:
@@ -784,16 +784,17 @@ class Mignis:
             '>S': [],
             '>M': [],
             '>D': [],
+            '{': [],
         }
 
         # No optimizations at the moment.
-        for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S']:
+        for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S', '{']:
             for r in rules[ruletype]:
                 new_rules[ruletype].append(r)
         
         '''
             # Remove duplicated rules and merge their abstract
-                for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S']:
+                for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S', '{']:
                     for r in rules[ruletype]:
                         print r.get_iptables_rules(rules)
                         # If we can find a matching rule in new_rules (x), it means
@@ -961,11 +962,26 @@ class Mignis:
             '>S': [],
             '>M': [],
             '>D': [],
+            '{': [],
         }
 
         # Expand lists inside each abstract_rule and add each expanded rule
         # (at the moment we don't expand params)
+        inside_sequence = False
+        #sequence_counter = 0
         for abstract_rule in abstract_rules:
+            if abstract_rule[0] == '{':
+                if inside_sequence:
+                    raise MignisException(self, 'Nested sequences are meaningless.')
+                inside_sequence = True
+                continue
+            elif abstract_rule[0] == '}':
+                if not inside_sequence:
+                    raise MignisException(self, 'Unexpected end of sequence "}" found.')
+                inside_sequence = False
+                #sequence_counter += 1
+                continue
+            
             if self.debug >= 3:
                 print('Expanding rule {0}'.format(abstract_rule))
 
@@ -979,6 +995,7 @@ class Mignis:
             # Add each expanded rule
             for rule in product(*rules):
                 rule = ''.join(rule)
+
                 if self.debug >= 3:
                     print("    expanded rule: {0}".format([rule, params]))
 
@@ -1012,7 +1029,6 @@ class Mignis:
                     elif ruletype == '>':
                         if r_nat_left and r_nat_right:
                             raise MignisException(self, 'Bad firewall rule in configuration file.')
-
                         if r_nat_left:
                             # SNAT
                             if r_nat_left == '[.]':
@@ -1037,7 +1053,14 @@ class Mignis:
                 except RuleException as e:
                     raise MignisException(self, 'Error in configuration file:\n' + str(e))
 
-                rulesdict[ruletype].append(r)
+                if inside_sequence:
+                    #if len(rulesdict['{']) <= sequence_counter:
+                    #    rulesdict['{'].append([r])
+                    #else:
+                    #    rulesdict['{'][sequence_counter].append(r)
+                    rulesdict['{'].append(r)
+                else:
+                    rulesdict[ruletype].append(r)
         
         if self.debug >= 2:
             pprint.pprint(rulesdict, width=200)
