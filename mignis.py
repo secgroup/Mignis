@@ -21,7 +21,7 @@ import pprint
 import argparse
 import traceback
 import string
-from itertools import product
+from itertools import product, groupby
 
 
 class RuleException(Exception):
@@ -662,6 +662,7 @@ class Mignis:
         if self.insert_default_rules:
             self.default_rules()
         self.firewall_rules()
+        self.policies_rules()
         self.ip_intf_binding_rules()
         self.custom_rules()
         self.log_rules()
@@ -714,27 +715,27 @@ class Mignis:
         self.wr('\n\n## Rules')
 
         # Rules optimization
-        self.rulesdict = self.pre_optimize_rules(self.rulesdict)
+        self.fw_rulesdict = self.pre_optimize_rules(self.fw_rulesdict)
 
         # Cycle over the dictionary using a specific order (deny rules are first)
         # and add them to iptables
         for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S']:
-            for rule in self.rulesdict[ruletype]:
+            for rule in self.fw_rulesdict[ruletype]:
                 # Debugging info
                 if self.debug >= 2:
                     print('\n# [D]\n' + str(rule))
                 if self.debug >= 1:
                     print('\n# ' + rule.params['abstract'])
                 # Add the rule to iptables
-                rules = rule.get_iptables_rules(self.rulesdict)
+                rules = rule.get_iptables_rules(self.fw_rulesdict)
                 for r in rules:
                     self.add_iptables_rule(r)
         
         # Check if rules overlap
-        for (ruletype_a, rules_a) in self.rulesdict.iteritems():
+        for (ruletype_a, rules_a) in self.fw_rulesdict.iteritems():
             if ruletype_a == '!': continue
             for rule_a in rules_a:
-                for (ruletype_b, rules_b) in self.rulesdict.iteritems():
+                for (ruletype_b, rules_b) in self.fw_rulesdict.iteritems():
                     if ruletype_b == '!': continue
                     for rule_b in rules_b:
                         if rule_b is rule_a: continue
@@ -744,6 +745,31 @@ class Mignis:
                                 .format(rule_a.params['abstract'], rule_b.params['abstract']))
 
         self.wr('\n##\n')
+
+    def policies_rules(self):
+        '''Execution of the policies rules defined in section POLICIES
+        '''
+        self.wr('\n## Policies')
+
+        # Rules optimization
+        self.policies_rulesdict = self.pre_optimize_rules(self.policies_rulesdict)
+
+        # Cycle over the dictionary and add the rules to iptables
+        for ruletype in self.policies_rulesdict.iterkeys():
+            for rule in self.policies_rulesdict[ruletype]:
+                # Debugging info
+                if self.debug >= 2:
+                    print('\n# [D]\n' + str(rule))
+                if self.debug >= 1:
+                    print('\n# ' + rule.params['abstract'])
+                # Add the rule to iptables
+                rules = rule.get_iptables_rules(self.policies_rulesdict)
+                for r in rules:
+                    self.add_iptables_rule(r)
+
+        self.wr('\n##\n')
+        
+
 
     def pre_optimize_rules(self, rules):
         '''Do all the requested optimizations over the rules, before they get
@@ -882,7 +908,7 @@ class Mignis:
         '''Read a configuration section. 'what' is the configuration section name,
         while 'config' is the whole configuration as a string.
         Returns a list where each element is a line, and every element is a list
-        containing the line splitted by tabs.
+        containing the line splitted by 'split_separator'.
         '''
         r = re.search('(.*?)(\n*\Z)', config[what], re.DOTALL)
         if r and r.groups():
@@ -926,31 +952,8 @@ class Mignis:
             r[1] = ports
         return r
 
-    def read_config(self):
-        '''Parses the configuration file and populates the rulesdict dictionary
-        '''
-
-        # Read the configuration file and split by section
-        print("[*] Reading the configuration")
-        config = open(self.config_file).read()
-        config = re.split('(INTERFACES|ALIASES|FIREWALL|CUSTOM)\n', config)[1:]
-        config = dict(zip(config[::2], config[1::2]))
-        
-        # Read the interfaces
-        intf = self.config_get('INTERFACES', config)
-        for x in intf:
-            self.intf[x[0]] = (x[1], IPv4Network(x[2], strict=True))
-        self.intf['local'] = ('lo', IPv4Network('127.0.0.0/8', strict=True))
-        
-        # Read the aliases
-        aliases_list = self.config_get('ALIASES', config)
-        self.aliases = {}
-        for x in aliases_list:
-            self.aliases[x[0]] = x[1]
-
-        # Read the firewall rules
-        abstract_rules = self.config_get('FIREWALL', config, '\|', 1)
-        self.rulesdict = {
+    def read_mignis_rules(self, abstract_rules):
+        rulesdict = {
             '/': [],
             '//': [],
             '>': [],
@@ -1034,11 +1037,69 @@ class Mignis:
                 except RuleException as e:
                     raise MignisException(self, 'Error in configuration file:\n' + str(e))
 
-                self.rulesdict[ruletype].append(r)
-            
-        if self.debug >= 2:
-            pprint.pprint(self.rulesdict, width=200)
+                rulesdict[ruletype].append(r)
         
+        if self.debug >= 2:
+            pprint.pprint(rulesdict, width=200)
+
+        return rulesdict
+
+
+    def read_config(self):
+        '''Parses the configuration file and populates the rulesdict dictionary
+        '''
+
+        # Read the configuration file and split by section
+        print("[*] Reading the configuration")
+        config = open(self.config_file).read()
+        config = re.split('(INTERFACES|ALIASES|FIREWALL|POLICIES|CUSTOM)\n', config)[1:]
+        config = dict(zip(config[::2], config[1::2]))
+
+        # Read the interfaces
+        intf = self.config_get('INTERFACES', config)
+        for x in intf:
+            self.intf[x[0]] = (x[1], IPv4Network(x[2], strict=True))
+        self.intf['local'] = ('lo', IPv4Network('127.0.0.0/8', strict=True))
+        
+        # Read the aliases
+        aliases_list = self.config_get('ALIASES', config)
+        self.aliases = {}
+        for x in aliases_list:
+            self.aliases[x[0]] = x[1]
+
+        # Read the firewall rules
+        if self.debug >= 2:
+            print("\n[+] Firewall rules")
+        abstract_rules = self.config_get('FIREWALL', config, '\|', 1)
+        self.fw_rulesdict = self.read_mignis_rules(abstract_rules)
+
+        # Read the default policies
+        policies = self.config_get('POLICIES', config, '\|', 1)
+        if self.debug >= 2:
+            print("\n[+] Policies")
+        '''
+        # Split policies in groups
+        policies = groupby(policies, lambda x: re.search('^(.*):$', x[0]))
+        policies_dict = {}
+        prev_group = ""
+        for group, rules in policies:
+            if not group:
+                policies_dict[prev_group] = list(rules)
+            else:
+                prev_group = group.groups()[0]
+        # Verify that only reject and drop groups were specified
+        for k in policies_dict.iterkeys():
+            if k not in ['reject', 'drop']:
+                raise MignisException(self, 'Bad policy specified.')
+        self.policies_rulesdict = {}
+        self.policies_rulesdict['reject'] = self.read_mignis_rules(policies_dict['reject'])
+        self.policies_rulesdict['drop'] = self.read_mignis_rules(policies_dict['drop'])
+        '''
+        self.policies_rulesdict = self.read_mignis_rules(policies)
+        for k, item in self.policies_rulesdict.items():
+            if k not in ['/', '//'] and item != []:
+                raise MignisException(self, 'You can only specify reject (//) or drop (/) rules as policies.')
+
         # Read the custom rules
         self.custom = self.config_get('CUSTOM', config, split=False)
 
