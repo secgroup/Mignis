@@ -10,7 +10,6 @@ $ ./mignis.py -h
 
 import operator
 import re
-import regex
 import sys
 from ipaddr import IPv4Address, IPv4Network
 from ipaddr_ext import IPv4Range
@@ -848,8 +847,19 @@ class Mignis:
         for rule in self.custom:
             # Search and replace aliases
             for alias, val in self.aliases.iteritems():
+                '''
+                the re module, when using look-behind, requires a fixed-width pattern.
+                the regex module allows variable-width patterns and thus the following
+                for loop can be replaced by this line:
+                switch = '(-d|-s|--destination|--source) '
+                rule = re.sub(
+                            '(?<={0}){1}(?={2})'.format(switch, alias, '[^a-zA-Z0-9\-_]'),
+                            val,
+                            rule)
+                when the regex module will replace re, we can change this code.
+                '''
                 for switch in ['-d ', '-s ', '--destination ', '--source ']:
-                    rule = regex.sub(
+                    rule = re.sub(
                                 '(?<={0}){1}(?={2})'.format(switch, alias, '[^a-zA-Z0-9\-_]'),
                                 val,
                                 rule)
@@ -857,7 +867,7 @@ class Mignis:
             for alias in self.intf:
                 subnet = self.intf[alias][0]
                 for switch in ['-i ', '-o ', '--in-interface ', '--out-interface ']:
-                    rule = regex.sub(
+                    rule = re.sub(
                                 '(?<={0}){1}(?={2})'.format(switch, alias, '[^a-zA-Z0-9\-_]'),
                                 subnet,
                                 rule)
