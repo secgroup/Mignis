@@ -7,9 +7,11 @@ Mignis is designed to help writing iptables rules using an more human-readable s
 
 ### Requirements
 * Python 2.7 or higher (Python 3.x supported).
+
 <!--
 * [regex][], an alternative regular expression module. It can be installed manually by executing `easy_install regex`. This also requires the package python-dev as a dependency (execute `apt-get install python-dev` on a debian distribution).
 -->
+
 <!--
 [ipaddr-py][], a python IP address manipulation library. It can be installed manually by executing `easy_install ipaddr`.
 -->
