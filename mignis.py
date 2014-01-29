@@ -1174,6 +1174,8 @@ def main():
         mignis.apply_rules()
     except MignisException as e:
         print('\n[!] ' + str(e))
+        if args['execute_rules']:
+            mignis.reset_iptables()
         sys.exit(-3)
     except:
         print('\n[!] An unexpected error occurred!')
