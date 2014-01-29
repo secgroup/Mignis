@@ -703,10 +703,10 @@ class Mignis:
         self.add_iptables_rule('-A INPUT -s 0.0.0.0 -d 255.255.255.255 -j ACCEPT', {'abstract': rule})
         self.add_iptables_rule('-t mangle -A PREROUTING -s 0.0.0.0 -d 255.255.255.255 -j ACCEPT', {'abstract': rule})
         # We don't allow packets to go out from the same interface they came in
-        self.wr('# - Same-interface packets')
-        for ipsub in self.intf.iterkeys():
-            self.add_iptables_rule('-A FORWARD -i {intf} -o {intf} -j DROP',
-                                    {'intf': self.intf[ipsub][0], 'abstract': 'drop same-interface packets'})
+        #self.wr('# - Same-interface packets')
+        #for ipsub in self.intf.iterkeys():
+        #    self.add_iptables_rule('-A FORWARD -i {intf} -o {intf} -j DROP',
+        #                            {'intf': self.intf[ipsub][0], 'abstract': 'drop same-interface packets'})
 
     def firewall_rules(self):
         '''Execution of the firewall rules defined in section FIREWALL
