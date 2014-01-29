@@ -95,7 +95,7 @@ class Rule:
                                 'You have to use the Mignis\'s syntax to specify ports.'
                                 .format(invalid_option.groups()[1]))
         check_regexp= ('( |\A)('
-                        '-s|--source|-d|--destination|'
+                        #'-s|--source|-d|--destination|'
                         '-j|-C|-S|-F|-L|-Z|-N|-X|-P|-E'
                         ')( |\Z)')
         invalid_option = re.search(check_regexp, filters)
