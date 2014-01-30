@@ -206,7 +206,7 @@ class Rule:
         params = self.params.copy()
 
         if self.params['rtype'] == '>':
-            return self._dbl_forward_er(params)
+            return self._forward(params)
         elif self.params['rtype'] == '<>':
             return self._dbl_forward(params)
         elif self.params['rtype'] == '/':
@@ -365,7 +365,7 @@ class Rule:
         rule = re.sub(' +', ' ', fmt.format(**params))
         return rule
 
-    def _dbl_forward_er(self, params, flip=False):
+    def _forward(self, params, flip=False):
         '''Translation for ">".
         If flip is True, the 'to' and 'from' parameters are switched
         (this only happens for the non-local case).
@@ -421,8 +421,8 @@ class Rule:
         '''Translation for "<>"
         '''
         rules = []
-        rules.extend(self._dbl_forward_er(params))
-        rules.extend(self._dbl_forward_er(params, flip=True))
+        rules.extend(self._forward(params))
+        rules.extend(self._forward(params, flip=True))
         return rules
 
     def _forward_deny(self, params, reject=False):
@@ -455,7 +455,7 @@ class Rule:
         '''Translation for ">" in the case of a SNAT
         '''
         rules = []
-        rules.extend(self._dbl_forward_er(params))
+        rules.extend(self._forward(params))
 
         if masquerade:
             target = 'MASQUERADE'
@@ -484,7 +484,7 @@ class Rule:
         # Forward rules without filters
         filters = params['filters']
         params['filters'] = ''
-        rules.extend(self._dbl_forward_er(params))
+        rules.extend(self._forward(params))
         params['filters'] = filters
 
         if params['from_alias'] == 'local':
@@ -1146,7 +1146,7 @@ def parse_args():
     parser.add_argument('-c', dest='config_file', metavar='filename', help='configuration file', required=True)
     parser.add_argument('-d', dest='debug', help='set debugging output level (0-2)', required=False, type=int, default=0, choices=range(4))
     parser.add_argument('-x', dest='default_rules', help='do not insert default rules', required=False, action='store_false')
-    parser.add_argument('-n', dest='dryrun', help='do not execute the rules (dryrun)', required=False, action='store_true')
+    parser.add_argument('-n', dest='dryrun', help='do not execute/write the rules (dryrun)', required=False, action='store_true')
     group_exec = parser.add_mutually_exclusive_group(required=True)
     group_exec.add_argument('-w', dest='write_rules_filename', metavar='filename', help='write the rules to file', required=False)
     group_exec.add_argument('-e', dest='execute_rules', help='execute the rules without writing to file', required=False, action='store_true')
