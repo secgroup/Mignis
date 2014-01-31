@@ -151,11 +151,11 @@ class Rule:
         return (alias, intf, ip, port)
 
     def ip2subnet(self, ip):
-        '''Returns the subnet the ip is in, or None if not found
+        '''Returns the alias of the subnet the ip is in, or None if not found
         '''
-        for subnet in self.mignis.intf:
-            if ip in self.mignis.intf[subnet][1]:
-                return subnet
+        for alias in self.mignis.intf:
+            if ip in self.mignis.intf[alias][1]:
+                return alias
         else:
             return None
 
@@ -235,11 +235,12 @@ class Rule:
             ext > [1.1.1.3] 1.1.1.1
             '''
 
-            for rule in rulesdict['>']:
-                if (rule.params['from_intf'] == params['from_intf'] and
-                        rule.params['to_intf'] == params['nat_intf']):
-                   self.mignis.warning('Forward and NAT rules collision:\n- {0}\n- {1}\n'
-                                .format(rule.params['abstract'], params['abstract']))
+            # FIXME: improve nat overlap check!
+            #for rule in rulesdict['>']:
+            #    if (rule.params['from_intf'] == params['from_intf'] and
+            #            rule.params['to_intf'] == params['nat_intf']):
+            #       self.mignis.warning('Forward and NAT rules collision:\n- {0}\n- {1}\n'
+            #                    .format(rule.params['abstract'], params['abstract']))
             # TODO: should we check ports? otherwise isn't this warning too broad?
 
             return self._dnat(params)
@@ -549,6 +550,8 @@ class Mignis:
         '''
         # TODO: use subprocess.check_call with try/except in place of system
         if not self.dryrun:
+            if self.debug >= 2:
+                print('COMMAND: ' + cmd)
             ret = os.system(cmd)
             if ret:
                 raise MignisException(self, 'Command execution error (code: {0}).'.format(ret))
@@ -835,7 +838,9 @@ class Mignis:
                 # Accept rule for all other IPs
                 self.add_iptables_rule('-t mangle -A PREROUTING -i {subnet} -j ACCEPT', params)
             else:
-                params = {'subnet': subnet, 'ip': ip, 'abstract': 'bind ip {0} to intf {1}'.format(ip, subnet)}
+                params = { 'subnet': subnet, 
+                           'ip': ip, 
+                           'abstract': 'bind ip {0} to intf {1}'.format(ip, subnet) }
                 self.add_iptables_rule('-t mangle -A PREROUTING -i {subnet} -s {ip} -j ACCEPT', params)
 
     def custom_rules(self):
@@ -915,6 +920,25 @@ class Mignis:
         self.add_iptables_rule('-A filter_drop -j LOG --log-prefix "DROP-UNK "')
         self.add_iptables_rule('-A filter_drop -j DROP')
 
+    def query_rules(self, query):
+        self.wr('\n\n## Executing query "{0}"'.format(query))
+
+        q_rulesdict = self.read_mignis_rules([[query]])
+
+        # Check if rules overlap
+        for (ruletype_a, rules_a) in q_rulesdict.iteritems():
+            if ruletype_a == '/': continue
+            for rule_a in rules_a:
+                for (ruletype_b, rules_b) in self.fw_rulesdict.iteritems():
+                    if ruletype_b == '/': continue
+                    for rule_b in rules_b:
+                        if rule_b is rule_a: continue
+                        # Check if rule_a and rule_b overlap
+                        if rule_b.overlaps(rule_a):
+                            print(rule_b.params['abstract'])
+
+        self.wr('\n##\n')
+
     def config_get(self, what, config, split_separator='\s+', split_count=0, split=True):
         '''Read a configuration section. 'what' is the configuration section name,
         while 'config' is the whole configuration as a string.
@@ -948,17 +972,17 @@ class Mignis:
             raise MignisConfigException('invalid host:port parameter "{0}".'.format(s))
 
         # Convert aliases
-        if r[0] in self.aliases:
-            r[0] = self.aliases[r[0]]
+        #if r[0] in self.aliases:
+        #    r[0] = self.aliases[r[0]]
 
         # Ports
         if len(r) == 1:
             r.append(None)
         else:
             ports = map(int, r[1].split('-'))
-            if (len(ports) > 2 or
-                    ports[0] < 0 or ports[0] > 65535 or
-                    (len(ports) == 2 and (ports[1] < 0 or ports[1] > 65535 or ports[0] > ports[1]))):
+            if (len(ports) > 2
+            or ports[0] < 0 or ports[0] > 65535
+            or (len(ports) == 2 and (ports[1] < 0 or ports[1] > 65535 or ports[0] > ports[1]))):
                 raise MignisConfigException('invalid port range "{0}".'.format(ports))
             r[1] = ports
         return r
@@ -978,7 +1002,6 @@ class Mignis:
         # Expand lists inside each abstract_rule and add each expanded rule
         # (at the moment we don't expand params)
         inside_sequence = False
-        #sequence_counter = 0
         for abstract_rule in abstract_rules:
             if abstract_rule[0] == '{':
                 if inside_sequence:
@@ -989,7 +1012,6 @@ class Mignis:
                 if not inside_sequence:
                     raise MignisException(self, 'Unexpected end of sequence "}" found.')
                 inside_sequence = False
-                #sequence_counter += 1
                 continue
             
             if self.debug >= 3:
@@ -998,18 +1020,46 @@ class Mignis:
             rule = abstract_rule[0]
             params = abstract_rule[1] if len(abstract_rule) > 1 else ''
 
+            # Convert aliases
+            # TODO: this is truly ugly. Do a better replacement for aliases
+            replace_again = True
+            while replace_again:
+                replace_again = False
+                for alias, val in self.aliases.iteritems():
+                    new_rule = re.sub('(?<={0}){1}(?={0})'.format('[^a-zA-Z0-9\-_]', alias), val, ' ' + rule + ' ')[1:-1]
+                    if new_rule != rule:
+                        replace_again = True
+                        rule = new_rule
+
             # Create a list of lists, splitting on ", *" for each list found.
             # Each list is written using "(item1, item2, ...)".
             rules = map(lambda x: re.split(', *', x), filter(None, re.split('[()]', rule)))
+
+            # Flatten lists of lists
+            # there is a list of lists if an the first or last element of an inner list is ''
+            i = 0
+            while i < len(rules):
+                if rules[i][-1] == '':
+                    rules[i] = rules[i][:-1]
+                    if rules[i+1]:
+                        rules[i] += rules.pop(i+1)
+                elif rules[i][0] == '':
+                    rules[i-1] += rules.pop(i)[1:]
+                else:
+                    i += 1
 
             # Add each expanded rule
             for rule in product(*rules):
                 rule = ''.join(rule)
 
-                if self.debug >= 3:
-                    print("    expanded rule: {0}".format([rule, params]))
+                # Replace known strings with aliases, for the abstract rule
+                abstract_rule = rule
+                for alias, val in self.aliases.iteritems():
+                    abstract_rule = re.sub('(?<={0}){1}(?={0})'.format('[^a-zA-Z0-9\-_]', val), alias, ' ' + abstract_rule + ' ')[1:-1]
+                abstract_rule = (abstract_rule + ' ' + params).strip()
 
-                abstract_rule = (rule + ' ' + params).strip()
+                if self.debug >= 3:
+                    print("    expanded rule: {0}".format([abstract_rule, params]))
 
                 rule = re.search('^(.*?) *(\[.*?\])? (/|//|>|<>) (\[.*?\])? *(.*?)$', rule)
                 if not rule:
@@ -1064,10 +1114,6 @@ class Mignis:
                     raise MignisException(self, 'Error in configuration file:\n' + str(e))
 
                 if inside_sequence:
-                    #if len(rulesdict['{']) <= sequence_counter:
-                    #    rulesdict['{'].append([r])
-                    #else:
-                    #    rulesdict['{'][sequence_counter].append(r)
                     rulesdict['{'].append(r)
                 else:
                     rulesdict[ruletype].append(r)
@@ -1081,7 +1127,6 @@ class Mignis:
     def read_config(self):
         '''Parses the configuration file and populates the rulesdict dictionary
         '''
-
         # Read the configuration file and split by section
         print("[*] Reading the configuration")
         config = open(self.config_file).read()
@@ -1093,9 +1138,9 @@ class Mignis:
         for x in intf:
             self.intf[x[0]] = (x[1], IPv4Network(x[2], strict=True))
         self.intf['local'] = ('lo', IPv4Network('127.0.0.0/8', strict=True))
-        
+
         # Read the aliases
-        aliases_list = self.config_get('ALIASES', config)
+        aliases_list = self.config_get('ALIASES', config, split_count=1)
         self.aliases = {}
         for x in aliases_list:
             self.aliases[x[0]] = x[1]
@@ -1110,25 +1155,8 @@ class Mignis:
         policies = self.config_get('POLICIES', config, '\|', 1)
         if self.debug >= 2:
             print("\n[+] Policies")
-        '''
-        # Split policies in groups
-        policies = groupby(policies, lambda x: re.search('^(.*):$', x[0]))
-        policies_dict = {}
-        prev_group = ""
-        for group, rules in policies:
-            if not group:
-                policies_dict[prev_group] = list(rules)
-            else:
-                prev_group = group.groups()[0]
-        # Verify that only reject and drop groups were specified
-        for k in policies_dict.iterkeys():
-            if k not in ['reject', 'drop']:
-                raise MignisException(self, 'Bad policy specified.')
-        self.policies_rulesdict = {}
-        self.policies_rulesdict['reject'] = self.read_mignis_rules(policies_dict['reject'])
-        self.policies_rulesdict['drop'] = self.read_mignis_rules(policies_dict['drop'])
-        '''
         self.policies_rulesdict = self.read_mignis_rules(policies)
+        # Verify that only reject and drop rules were specified
         for k, item in self.policies_rulesdict.items():
             if k not in ['/', '//'] and item != []:
                 raise MignisException(self, 'You can only specify reject (//) or drop (/) rules as policies.')
@@ -1144,13 +1172,15 @@ def parse_args():
     parser = argparse.ArgumentParser(description='A semantic based tool for firewall configuration', add_help=False)
     parser.add_argument('-h', action='help', help='show this help message and exit')
     parser.add_argument('-c', dest='config_file', metavar='filename', help='configuration file', required=True)
+    group_action = parser.add_mutually_exclusive_group(required=True)
+    group_action.add_argument('-w', dest='write_rules_filename', metavar='filename', help='write the rules to file', required=False)
+    group_action.add_argument('-e', dest='execute_rules', help='execute the rules without writing to file', required=False, action='store_true')
+    group_action.add_argument('-q', dest='query_rules', metavar='query', help='perform a query over the configuration', required=False)
     parser.add_argument('-d', dest='debug', help='set debugging output level (0-2)', required=False, type=int, default=0, choices=range(4))
     parser.add_argument('-x', dest='default_rules', help='do not insert default rules', required=False, action='store_false')
     parser.add_argument('-n', dest='dryrun', help='do not execute/write the rules (dryrun)', required=False, action='store_true')
-    group_exec = parser.add_mutually_exclusive_group(required=True)
-    group_exec.add_argument('-w', dest='write_rules_filename', metavar='filename', help='write the rules to file', required=False)
-    group_exec.add_argument('-e', dest='execute_rules', help='execute the rules without writing to file', required=False, action='store_true')
     parser.add_argument('-f', dest='force', help='force rule execution or writing', required=False, action='store_true')
+    #parser.add_argument('-r', dest='reset_script', help='reset script to execute when an error occurs', required=False)
     args = vars(parser.parse_args())
     return args
 
@@ -1169,22 +1199,25 @@ def main():
         traceback.print_exc()
         sys.exit(-2)
 
-    try:
-        mignis.all_rules()
-        mignis.apply_rules()
-    except MignisException as e:
-        print('\n[!] ' + str(e))
-        if args['execute_rules']:
-            mignis.reset_iptables()
-        sys.exit(-3)
-    except:
-        print('\n[!] An unexpected error occurred!')
-        traceback.print_exc()
-        if args['execute_rules']:
-            mignis.reset_iptables()
-        sys.exit(-4)
+    if args['query_rules']:
+        mignis.query_rules(args['query_rules'])
+    else:
+        try:
+            mignis.all_rules()
+            mignis.apply_rules()
+        except MignisException as e:
+            print('\n[!] ' + str(e))
+            if args['execute_rules']:
+                mignis.reset_iptables()
+            sys.exit(-3)
+        except:
+            print('\n[!] An unexpected error occurred!')
+            traceback.print_exc()
+            if args['execute_rules']:
+                mignis.reset_iptables()
+            sys.exit(-4)
 
-    print('\n[*] Done.')
+        print('\n[*] Done.')
 
 
 if __name__ == '__main__':
