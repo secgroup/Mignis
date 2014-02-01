@@ -1096,10 +1096,8 @@ class Mignis:
                     print("    expanded rule: {0}".format([abstract_rule, params]))
 
                 allowed_chars = '[a-zA-Z0-9\./\*_\-:,\(\) ]'
-                print rule
                 #rule = re.search('^(.*?) *(\[.*?\])? (/|//|>|<>) (\[.*?\])? *(.*?)$', rule)
                 rule = re.search('^({0}+?)(?: +(\[{0}+?\]))? +(/|//|>|<>) +(?:(\[{0}+?\]) +)?({0}*?)(?: +({0}*?))?$'.format(allowed_chars), rule)
-                print rule
                 if not rule:
                     raise MignisException(self, 'Error in configuration file: bad firewall rule "{0}".'.format(rule))
                 rule = rule.groups()
