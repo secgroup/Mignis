@@ -74,15 +74,14 @@ lan [.] > ext
 lan / malicious_host
 
 # dnat to mypc on port 8888
-ext > [router_ext_ip:8888] mypc:8888 | -p udp
+ext > [router_ext_ip:8888] mypc:8888  udp
 
 # allow access to port 80 on this machine
-ext > local:80
+ext > local:80  tcp
 
 CUSTOM
 # ssh
 -A INPUT -p tcp --dport 22 -j ACCEPT
--A OUTPUT -m state --state ESTABLISHED -j ACCEPT
 ```
 
 Each configuration file needs 4 sections:
@@ -102,7 +101,7 @@ Each configuration file needs 4 sections:
 	* *opt* is one of: "/" (deny with DROP), "//" (deny with REJECT), ">" (one-way forward), "<>" (two-way forward)
 
 	Finally an *iptables filter* is any iptables option used for filtering packets.<br>
-	Common options may be "-p udp", "-p tcp", "-p icmp --icmp-type echo-reply", etc.
+	Common options may be "--icmp-type echo-reply", "-m module", etc.
 
 * **CUSTOM**: contains raw iptables rules. Note that you can also modify the tool's behavior here, since you can use the _-D_ and _-I_ switch for deleting and inserting rules in specific locations. We provide this section to add more flexibility, but we cannot guarantee that your custom rules will not conflict with the abstract ones, so please use this section with care and only if you know what you're doing.
 
@@ -122,7 +121,7 @@ Let's see some examples from the configuration above, to clearify how rules can 
 
 		iptables -A FORWARD -i eth0 -d 5.6.7.8 -j DROP
 
-1. ```ext > [router_ext_ip:8888] mypc:8888 | -p udp```<br>
+1. ```ext > [router_ext_ip:8888] mypc:8888  udp```<br>
 	UDP packets originating from _ext_ to *router_ext_ip* on port 8888, are DNAT'ed to _mypc_ on port 8888.
 
 		iptables -t mangle -A PREROUTING -p udp -i eth1 -d 10.0.0.2 --dport 8888 -m state --state NEW, INVALID -j DROP
@@ -132,7 +131,7 @@ Let's see some examples from the configuration above, to clearify how rules can 
 
 	Note: the first mangle rule is used to block packets which are trying to reach _mypc_ bypassing the NAT.
 
-1. ```ext > local:80```<br>
+1. ```ext > local:80  tcp```<br>
 	Allow access from _ext_ to port 80 on the local machine.
 
 		iptables -A INPUT -p tcp -i eth1 --dport 80 -j ACCEPT

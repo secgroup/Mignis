@@ -34,7 +34,7 @@ class Rule:
     # Dictionary with rule parameters
     params = {}
 
-    def __init__(self, mignis, abstract_rule, ruletype, r_from, r_to, filters, nat):
+    def __init__(self, mignis, abstract_rule, ruletype, r_from, r_to, protocol, filters, nat):
         self.mignis = mignis
 
         if filters is None:
@@ -44,7 +44,7 @@ class Rule:
         self._check_filters(filters)
 
         # Extract protocol from filters
-        filters, protocol = self._extract_protocol(filters)
+        #filters, protocol = self._extract_protocol(filters)
 
         # Expand r_from, r_to and r_nat to aliases, interfaces, IPs and ports
         from_alias, from_intf, from_ip, from_port = self._expand_address(r_from)
@@ -97,6 +97,7 @@ class Rule:
                                 .format(invalid_option.groups()[1]))
         check_regexp= ('( |\A)('
                         #'-s|--source|-d|--destination|'
+                        '-p|--protocol'
                         '-j|-C|-S|-F|-L|-Z|-N|-X|-P|-E'
                         ')( |\Z)')
         invalid_option = re.search(check_regexp, filters)
@@ -105,18 +106,18 @@ class Rule:
                                 'You can\'t use this switch as a filter.'
                                 .format(invalid_option.groups()[1]))
 
-    def _extract_protocol(self, filters):
-        '''Extract the protocol part from filters, and return the new filters
-        string and protocol, if present.
-        '''
-        proto_regexp = '( |\A)(-p|--protocol) (.*?)( |\Z)'
-        protocol = re.search(proto_regexp, filters)
-        if protocol:
-            filters = re.sub(proto_regexp, ' ', filters)
-            protocol = protocol.groups()[2]
-        else:
-            protocol = None
-        return filters, protocol
+    #def _extract_protocol(self, filters):
+    #    '''Extract the protocol part from filters, and return the new filters
+    #    string and protocol, if present.
+    #    '''
+    #    proto_regexp = '( |\A)(-p|--protocol) (.*?)( |\Z)'
+    #    protocol = re.search(proto_regexp, filters)
+    #    if protocol:
+    #        filters = re.sub(proto_regexp, ' ', filters)
+    #        protocol = protocol.groups()[2]
+    #    else:
+    #        protocol = None
+    #    return filters, protocol
             
     def _expand_address(self, addr):
         '''Given an address in the form ([*|interface|ip|subnet], port)
@@ -1094,12 +1095,16 @@ class Mignis:
                 if self.debug >= 3:
                     print("    expanded rule: {0}".format([abstract_rule, params]))
 
-                rule = re.search('^(.*?) *(\[.*?\])? (/|//|>|<>) (\[.*?\])? *(.*?)$', rule)
+                allowed_chars = '[a-zA-Z0-9\./\*_\-:,\(\) ]'
+                print rule
+                #rule = re.search('^(.*?) *(\[.*?\])? (/|//|>|<>) (\[.*?\])? *(.*?)$', rule)
+                rule = re.search('^({0}+?)(?: +(\[{0}+?\]))? +(/|//|>|<>) +(?:(\[{0}+?\]) +)?({0}*?)(?: +({0}*?))?$'.format(allowed_chars), rule)
+                print rule
                 if not rule:
                     raise MignisException(self, 'Error in configuration file: bad firewall rule "{0}".'.format(rule))
                 rule = rule.groups()
 
-                (r_from, r_nat_left, ruletype, r_nat_right, r_to) = rule
+                (r_from, r_nat_left, ruletype, r_nat_right, r_to, protocol) = rule
 
                 try:
                     r_from = self.config_split_ipport(r_from)
@@ -1115,10 +1120,10 @@ class Mignis:
                 try:
                     if ruletype in ['/', '//']:
                         # Deny
-                        r = Rule(self, abstract_rule, ruletype, r_from, r_to, params, None)
+                        r = Rule(self, abstract_rule, ruletype, r_from, r_to, protocol, params, None)
                     elif ruletype == '<>':
                         # Forward
-                        r = Rule(self, abstract_rule, ruletype, r_from, r_to, params, None)
+                        r = Rule(self, abstract_rule, ruletype, r_from, r_to, protocol, params, None)
                     elif ruletype == '>':
                         if r_nat_left and r_nat_right:
                             raise MignisException(self, 'Bad firewall rule in configuration file.')
@@ -1127,20 +1132,20 @@ class Mignis:
                             if r_nat_left == '[.]':
                                 # Masquerade
                                 ruletype = '>M'
-                                r = Rule(self, abstract_rule, ruletype, r_from, r_to, params, None)
+                                r = Rule(self, abstract_rule, ruletype, r_from, r_to, protocol, params, None)
                             else:
                                 # Classic SNAT
                                 ruletype = '>S'
                                 nat = self.config_split_ipport(r_nat_left[1:-1])
-                                r = Rule(self, abstract_rule, ruletype, r_from, r_to, params, nat)
+                                r = Rule(self, abstract_rule, ruletype, r_from, r_to, protocol, params, nat)
                         elif r_nat_right:
                             # DNAT
                             ruletype = '>D'
                             nat = self.config_split_ipport(r_nat_right[1:-1])
-                            r = Rule(self, abstract_rule, ruletype, r_from, r_to, params, nat)
+                            r = Rule(self, abstract_rule, ruletype, r_from, r_to, protocol, params, nat)
                         else:
                             # Forward
-                            r = Rule(self, abstract_rule, ruletype, r_from, r_to, params, None)
+                            r = Rule(self, abstract_rule, ruletype, r_from, r_to, protocol, params, None)
                     else:
                         raise MignisException(self, 'Bad firewall rule in configuration file.')
                 except RuleException as e:
