@@ -21,6 +21,7 @@ import argparse
 import traceback
 import string
 from itertools import product, groupby
+import tempfile
 
 
 class RuleException(Exception):
@@ -351,8 +352,8 @@ class Rule:
         protocol = params['protocol'] if 'protocol' in params else None
         if port or protocol:
             if port and not protocol:
-                # If a port has been specified without a protocol, add a default 'tcp' protocol.
-                protocol = 'tcp'
+                # If a port has been specified without a protocol, add a default 'all' protocol.
+                protocol = 'all'
             return ' -p ' + protocol
         return ''
 
@@ -556,18 +557,39 @@ class Mignis:
             if ret:
                 raise MignisException(self, 'Command execution error (code: {0}).'.format(ret))
 
-    def exec_rules(self):
+    def test_exec_rules(self):
+        # Create temp file for writing the rules
+        temp_fd, temp_file = tempfile.mkstemp(suffix='.ipt', prefix='mignis_')
+        self.write_rules(None, fd=temp_fd)
+
+        # Execute the rules.
+        # First in dryrun mode, and if no exception is raised they are executed for real.
+        self.exec_rules(temp_file, force_dryrun=True)
+        self.exec_rules(temp_file)
+
+        # Delete the temp file
+        os.unlink(temp_file)
+
+    def exec_rules(self, temp_file, force_dryrun=False):
+        options = ' '
+        if self.dryrun or force_dryrun:
+            options += '--test '
+
+        try:
+            # Execute the rules
+            self.execute('iptables-restore' + options + temp_file)
+        except MignisException as e:
+            raise MignisException(self, str(e) + '\nThe temporary file which generated the error is stored in "{0}"'.format(temp_file))
+
+    def write_rules(self, filename, fd=None):
         if self.dryrun: return
-        for rule in self.iptables_rules:
-            self.execute('iptables ' + rule)
 
-    def write_rules(self, filename):
-        if self.dryrun: return
-
-        if not self.force and os.path.exists(filename):
-            raise MignisException(self, 'The file already exists, use -f to overwrite.')
-
-        f = open(filename, 'w')
+        if fd:
+            f = os.fdopen(fd, 'w')
+        else:
+            if not self.force and os.path.exists(filename):
+                raise MignisException(self, 'The file already exists, use -f to overwrite.')
+            f = open(filename, 'w')
 
         # Split the rules in filter, nat and mangle tables
         separators = '[^a-zA-Z0-9\-_]'
@@ -593,6 +615,7 @@ class Mignis:
         f.close()
 
     def apply_rules(self):
+        print('\n[*] Applying rules')
         if self.dryrun:
             print('\n[*] Rules not applied (dryrun mode)')
         else:
@@ -601,52 +624,62 @@ class Mignis:
                 print('\n[*] Rules written.')
             else:
                 if self.force:
-                    self.exec_rules()
-                    print('\n[*] Rules executed.')
+                    self.test_exec_rules()
+                    print('\n[*] Rules applied.')
                 else:
                     execute = ''
                     print('')
                     while execute not in ['y', 'n']:
-                        execute = raw_input('Execute the rules? [y|n]: ').lower()
+                        execute = raw_input('Apply the rules? [y|n]: ').lower()
                     if execute == 'y':
-                        self.exec_rules()
-                        print('[*] Rules executed.')
+                        self.test_exec_rules()
+                        print('[*] Rules applied.')
                     else:
-                        print('[!] Rules NOT executed.')
+                        print('[!] Rules NOT applied.')
 
     def warning(self, s):
         if self.debug > 0:
             print("")
         print("# WARNING: " + s)
 
-    def reset_iptables(self):
-        '''Netfilter reset with default ACCEPT for every chain
-        '''
-        print('\n[*] Resetting netfilter')
-        if self.dryrun:
-            print('Skipped (dryrun mode)')
-            return
-        reset_cmd = '''cat << EOF | iptables-restore
-            *filter
-            :INPUT ACCEPT
-            :FORWARD ACCEPT
-            :OUTPUT ACCEPT
-            COMMIT
-            *nat
-            :PREROUTING ACCEPT
-            :POSTROUTING ACCEPT
-            :OUTPUT ACCEPT
-            COMMIT
-            *mangle
-            :PREROUTING ACCEPT
-            :INPUT ACCEPT
-            :FORWARD ACCEPT
-            :OUTPUT ACCEPT
-            :POSTROUTING ACCEPT
-            COMMIT
-            EOF'''
-        x = re.compile("^\s+", re.MULTILINE)
-        self.execute(x.sub('', reset_cmd))
+    #def reset_iptables(self):
+    #    '''Netfilter reset with default ACCEPT for every chain
+    #    '''
+    #    
+    #    if not self.execute_rules:
+    #        return
+    #        
+    #    print('\n[*] Resetting netfilter')
+    #    if self.dryrun:
+    #        print('Skipped (dryrun mode)')
+    #        return
+    #        
+    #    reset_cmd = '''cat << EOF | iptables-restore
+    #        *filter
+    #        :INPUT ACCEPT
+    #        :FORWARD ACCEPT
+    #        :OUTPUT ACCEPT
+    #        COMMIT
+    #        *nat
+    #        :PREROUTING ACCEPT
+    #        :POSTROUTING ACCEPT
+    #        :OUTPUT ACCEPT
+    #        COMMIT
+    #        *mangle
+    #        :PREROUTING ACCEPT
+    #        :INPUT ACCEPT
+    #        :FORWARD ACCEPT
+    #        :OUTPUT ACCEPT
+    #        :POSTROUTING ACCEPT
+    #        COMMIT
+    #        EOF'''
+    #    x = re.compile("^\s+", re.MULTILINE)
+    #    
+    #    try:                    
+    #        self.execute(x.sub('', reset_cmd))
+    #    except MignisException as e:
+    #        print('\n[!] ' + str(e))
+    #        sys.exit(-3)
 
     def add_iptables_rule(self, r, params=None):
         if params:
@@ -1189,8 +1222,6 @@ def main():
 
     try:
         mignis = Mignis(args['config_file'], args['default_rules'], args['debug'], args['force'], args['dryrun'], args['write_rules_filename'], args['execute_rules'])
-        if args['execute_rules']:
-            mignis.reset_iptables()
     except MignisException as e:
         print('\n[!] ' + str(e))
         sys.exit(-1)
@@ -1207,15 +1238,13 @@ def main():
             mignis.apply_rules()
         except MignisException as e:
             print('\n[!] ' + str(e))
-            if args['execute_rules']:
-                mignis.reset_iptables()
-            sys.exit(-3)
+            #mignis.reset_iptables()
+            sys.exit(-4)
         except:
             print('\n[!] An unexpected error occurred!')
             traceback.print_exc()
-            if args['execute_rules']:
-                mignis.reset_iptables()
-            sys.exit(-4)
+            #mignis.reset_iptables()
+            sys.exit(-5)
 
         print('\n[*] Done.')
 
