@@ -531,9 +531,8 @@ class Mignis:
     # Rules to be executed, as strings, in the correct order
     iptables_rules = []
 
-    def __init__(self, config_file, default_rules, debug, force, dryrun, write_rules_filename, execute_rules):
+    def __init__(self, config_file, debug, force, dryrun, write_rules_filename, execute_rules):
         self.config_file = config_file
-        self.insert_default_rules = default_rules
         self.debug = debug
         self.force = force
         self.dryrun = dryrun
@@ -695,13 +694,14 @@ class Mignis:
         print('\n[*] Building rules')
         self.policies()
         self.mandatory_rules()
-        if self.insert_default_rules:
+        if self.options['default_rules'] == 'yes':
             self.default_rules()
         self.firewall_rules()
         self.policies_rules()
         self.ip_intf_binding_rules()
         self.custom_rules()
-        self.log_rules()
+        if self.options['logging'] == 'yes':
+            self.log_rules()
     
     def mandatory_rules(self):
         '''Rules needed for the model to work.
@@ -979,6 +979,9 @@ class Mignis:
         Returns a list where each element is a line, and every element is a list
         containing the line splitted by 'split_separator'.
         '''
+        if what not in config:
+            raise MignisConfigException('Missing section "{0}" in the configuration file.'.format(what))
+
         r = re.search('(.*?)(\n*\Z)', config[what], re.DOTALL)
         if r and r.groups():
             # Get the section contents and split by line
@@ -1166,8 +1169,16 @@ class Mignis:
         # Read the configuration file and split by section
         print("[*] Reading the configuration")
         config = open(self.config_file).read()
-        config = re.split('(INTERFACES|ALIASES|FIREWALL|POLICIES|CUSTOM)\n', config)[1:]
+        config = re.split('(OPTIONS|INTERFACES|ALIASES|FIREWALL|POLICIES|CUSTOM)\n', config)[1:]
         config = dict(zip(config[::2], config[1::2]))
+
+        # Read the options
+        options = self.config_get('OPTIONS', config)
+        # Convert to lowercase and to a dictionary
+        options = dict([[y.lower() for y in x] for x in options])
+        # Setting default values
+        default_options = {'default_rules': 'yes', 'logging': 'yes'}
+        self.options = dict(default_options, **options)
 
         # Read the interfaces
         intf = self.config_get('INTERFACES', config)
@@ -1213,7 +1224,6 @@ def parse_args():
     group_action.add_argument('-e', dest='execute_rules', help='execute the rules without writing to file', required=False, action='store_true')
     group_action.add_argument('-q', dest='query_rules', metavar='query', help='perform a query over the configuration', required=False)
     parser.add_argument('-d', dest='debug', help='set debugging output level (0-2)', required=False, type=int, default=0, choices=range(4))
-    parser.add_argument('-x', dest='default_rules', help='do not insert default rules', required=False, action='store_false')
     parser.add_argument('-n', dest='dryrun', help='do not execute/write the rules (dryrun)', required=False, action='store_true')
     parser.add_argument('-f', dest='force', help='force rule execution or writing', required=False, action='store_true')
     #parser.add_argument('-r', dest='reset_script', help='reset script to execute when an error occurs', required=False)
@@ -1224,8 +1234,8 @@ def main():
     args = parse_args()
 
     try:
-        mignis = Mignis(args['config_file'], args['default_rules'], args['debug'], args['force'], args['dryrun'], args['write_rules_filename'], args['execute_rules'])
-    except MignisException as e:
+        mignis = Mignis(args['config_file'], args['debug'], args['force'], args['dryrun'], args['write_rules_filename'], args['execute_rules'])
+    except (MignisException, MignisConfigException) as e:
         print('\n[!] ' + str(e))
         sys.exit(-1)
     except:
