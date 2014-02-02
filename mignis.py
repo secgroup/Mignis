@@ -335,6 +335,12 @@ class Rule:
                 Rule.port_isinside(params_a['to_port'], params_b['to_port'])):
             return False
 
+        # Do the same for protocols
+        protocol_a = params_a['protocol']
+        protocol_b = params_b['protocol']
+        if not (protocol_a == protocol_b or protocol_a == 'all' or protocol_b == 'all'):
+            return False
+
         return True
 
 
