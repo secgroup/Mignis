@@ -310,7 +310,6 @@ class Rule:
     def overlaps(self, a):
         '''Check if rule "a" is already matched by us (rule "b").
         At the moment we only match rules which are already matched by wider rules with empty filters.
-        TODO: do a better matching
         '''
         params_a = a.params
         params_b = self.params
@@ -340,6 +339,9 @@ class Rule:
         protocol_b = params_b['protocol']
         if not (protocol_a == protocol_b or protocol_a == 'all' or protocol_b == 'all'):
             return False
+
+        # Check if nat overlaps
+        # TODO: do this
 
         return True
 
@@ -743,8 +745,13 @@ class Mignis:
         # Allow broadcast traffic
         self.wr('# - Broadcast traffic')
         rule ='allow broadcast traffic'
-        self.add_iptables_rule('-A INPUT -s 0.0.0.0 -d 255.255.255.255 -j ACCEPT', {'abstract': rule})
-        self.add_iptables_rule('-t mangle -A PREROUTING -s 0.0.0.0 -d 255.255.255.255 -j ACCEPT', {'abstract': rule})
+        self.add_iptables_rule('-A INPUT -d 255.255.255.255 -j ACCEPT', {'abstract': rule})
+        self.add_iptables_rule('-t mangle -A PREROUTING -d 255.255.255.255 -j ACCEPT', {'abstract': rule})
+        # Allow multicast traffic
+        self.wr('# - Multicast traffic')
+        rule ='allow multicast traffic'
+        self.add_iptables_rule('-A INPUT -d 224.0.0.0/4 -j ACCEPT', {'abstract': rule})
+        self.add_iptables_rule('-t mangle -A PREROUTING -d 224.0.0.0/4 -j ACCEPT', {'abstract': rule})
         # We don't allow packets to go out from the same interface they came in
         #self.wr('# - Same-interface packets')
         #for ipsub in self.intf.iterkeys():
@@ -783,7 +790,7 @@ class Mignis:
                         if rule_b is rule_a: continue
                         # Check if rule_a and rule_b overlap
                         if rule_b.overlaps(rule_a):
-                            self.warning("Two overlapping rules have been defined:\n- {0}\n- {1}"
+                            self.warning("Two overlapping rules have been defined:\n- {0}\n- {1}\n"
                                 .format(rule_a.params['abstract'], rule_b.params['abstract']))
 
         self.wr('\n##\n')
@@ -810,8 +817,6 @@ class Mignis:
                     self.add_iptables_rule(r)
 
         self.wr('\n##\n')
-        
-
 
     def pre_optimize_rules(self, rules):
         '''Do all the requested optimizations over the rules, before they get
@@ -888,7 +893,7 @@ class Mignis:
         The only exception are aliases, which will be replaced with their
         corresponding value.
         '''
-        self.wr('\n# Custom rules')
+        self.wr('\n## Custom rules')
         for rule in self.custom:
             # Search and replace aliases
             for alias, val in self.aliases.iteritems():
@@ -918,6 +923,7 @@ class Mignis:
                                 rule)
 
             self.add_iptables_rule(rule)
+        self.wr('\n##\n')
 
     def log_rules(self):
         '''Logging rules. We log the filter (input/output/forward) and mangle (prerouting only) tables
@@ -1048,12 +1054,12 @@ class Mignis:
         for abstract_rule in abstract_rules:
             if abstract_rule[0] == '{':
                 if inside_sequence:
-                    raise MignisException(self, 'Nested sequences are meaningless.')
+                    raise MignisConfigException('Nested sequences are meaningless.')
                 inside_sequence = True
                 continue
             elif abstract_rule[0] == '}':
                 if not inside_sequence:
-                    raise MignisException(self, 'Unexpected end of sequence "}" found.')
+                    raise MignisConfigException('Unexpected end of sequence "}" found.')
                 inside_sequence = False
                 continue
             
@@ -1108,16 +1114,13 @@ class Mignis:
                 #rule = re.search('^(.*?) *(\[.*?\])? (/|//|>|<>) (\[.*?\])? *(.*?)$', rule)
                 rule = re.search('^({0}+?)(?: +(\[{0}+?\]))? +(/|//|>|<>) +(?:(\[{0}+?\]) +)?({0}*?)(?: +({0}*?))?$'.format(allowed_chars), rule)
                 if not rule:
-                    raise MignisException(self, 'Error in configuration file: bad firewall rule "{0}".'.format(rule))
+                    raise MignisConfigException('bad firewall rule "{0}".'.format(rule))
                 rule = rule.groups()
 
                 (r_from, r_nat_left, ruletype, r_nat_right, r_to, protocol) = rule
 
-                try:
-                    r_from = self.config_split_ipport(r_from)
-                    r_to = self.config_split_ipport(r_to)
-                except MignisConfigException as e:
-                    raise MignisException(self, 'Error in configuration file: ' + str(e))
+                r_from = self.config_split_ipport(r_from)
+                r_to = self.config_split_ipport(r_to)
                 
                 # Find and replace aliases inside params
                 if params:
@@ -1133,7 +1136,7 @@ class Mignis:
                         r = Rule(self, abstract_rule, ruletype, r_from, r_to, protocol, params, None)
                     elif ruletype == '>':
                         if r_nat_left and r_nat_right:
-                            raise MignisException(self, 'Bad firewall rule in configuration file.')
+                            raise MignisConfigException('bad firewall rule in configuration file.')
                         if r_nat_left:
                             # SNAT
                             if r_nat_left == '[.]':
@@ -1154,9 +1157,9 @@ class Mignis:
                             # Forward
                             r = Rule(self, abstract_rule, ruletype, r_from, r_to, protocol, params, None)
                     else:
-                        raise MignisException(self, 'Bad firewall rule in configuration file.')
+                        raise MignisConfigException('bad firewall rule in configuration file.')
                 except RuleException as e:
-                    raise MignisException(self, 'Error in configuration file:\n' + str(e))
+                    raise MignisConfigException(str(e))
 
                 if inside_sequence:
                     rulesdict['{'].append(r)
@@ -1168,55 +1171,75 @@ class Mignis:
 
         return rulesdict
 
+    def config_include(self, match):
+        filename = match.groups()[0]
+        if not filename:
+            raise MignisConfigException('Invalid include directive "{0}".'.format(match.group()))
+
+        filename = self.config_dir + '/' + filename
+        try:
+            return open(filename).read().strip()
+        except:
+            raise MignisConfigException('Unable to read file "{0}" for inclusion.'.format(filename))
 
     def read_config(self):
         '''Parses the configuration file and populates the rulesdict dictionary
         '''
-        # Read the configuration file and split by section
-        print("[*] Reading the configuration")
-        config = open(self.config_file).read()
-        config = re.split('(OPTIONS|INTERFACES|ALIASES|FIREWALL|POLICIES|CUSTOM)\n', config)[1:]
-        config = dict(zip(config[::2], config[1::2]))
+        try:
+            print("[*] Reading the configuration")
+            self.config_dir = os.path.dirname(self.config_file)
+            config = open(self.config_file).read()
+            
+            # Execute the @include directives (recursively)
+            old_config = ''
+            while config != old_config:
+                old_config = config
+                config = re.sub('(?<=\n)@include (.*?)(?=\n)', self.config_include, config)
+            print config
+            # Split by section
+            config = re.split('(OPTIONS|INTERFACES|ALIASES|FIREWALL|POLICIES|CUSTOM)\n', config)[1:]
+            config = dict(zip(config[::2], config[1::2]))
 
-        # Read the options
-        options = self.config_get('OPTIONS', config)
-        # Convert to lowercase and to a dictionary
-        options = dict([[y.lower() for y in x] for x in options])
-        # Setting default values
-        default_options = {'default_rules': 'yes', 'logging': 'yes'}
-        self.options = dict(default_options, **options)
+            # Read the options
+            options = self.config_get('OPTIONS', config)
+            # Convert to lowercase and to a dictionary
+            options = dict([[y.lower() for y in x] for x in options])
+            # Setting default values
+            default_options = {'default_rules': 'yes', 'logging': 'yes'}
+            self.options = dict(default_options, **options)
 
-        # Read the interfaces
-        intf = self.config_get('INTERFACES', config)
-        for x in intf:
-            self.intf[x[0]] = (x[1], IPv4Network(x[2], strict=True))
-        self.intf['local'] = ('lo', IPv4Network('127.0.0.0/8', strict=True))
+            # Read the interfaces
+            intf = self.config_get('INTERFACES', config)
+            for x in intf:
+                self.intf[x[0]] = (x[1], IPv4Network(x[2], strict=True))
+            self.intf['local'] = ('lo', IPv4Network('127.0.0.0/8', strict=True))
 
-        # Read the aliases
-        aliases_list = self.config_get('ALIASES', config, split_count=1)
-        self.aliases = {}
-        for x in aliases_list:
-            self.aliases[x[0]] = x[1]
+            # Read the aliases
+            aliases_list = self.config_get('ALIASES', config, split_count=1)
+            self.aliases = {}
+            for x in aliases_list:
+                self.aliases[x[0]] = x[1]
 
-        # Read the firewall rules
-        if self.debug >= 2:
-            print("\n[+] Firewall rules")
-        abstract_rules = self.config_get('FIREWALL', config, '\|', 1)
-        self.fw_rulesdict = self.read_mignis_rules(abstract_rules)
+            # Read the firewall rules
+            if self.debug >= 2:
+                print("\n[+] Firewall rules")
+            abstract_rules = self.config_get('FIREWALL', config, '\|', 1)
+            self.fw_rulesdict = self.read_mignis_rules(abstract_rules)
 
-        # Read the default policies
-        policies = self.config_get('POLICIES', config, '\|', 1)
-        if self.debug >= 2:
-            print("\n[+] Policies")
-        self.policies_rulesdict = self.read_mignis_rules(policies)
-        # Verify that only reject and drop rules were specified
-        for k, item in self.policies_rulesdict.items():
-            if k not in ['/', '//'] and item != []:
-                raise MignisException(self, 'You can only specify reject (//) or drop (/) rules as policies.')
+            # Read the default policies
+            policies = self.config_get('POLICIES', config, '\|', 1)
+            if self.debug >= 2:
+                print("\n[+] Policies")
+            self.policies_rulesdict = self.read_mignis_rules(policies)
+            # Verify that only reject and drop rules were specified
+            for k, item in self.policies_rulesdict.items():
+                if k not in ['/', '//'] and item != []:
+                    raise MignisConfigException('You can only specify reject (//) or drop (/) rules as policies.')
 
-        # Read the custom rules
-        self.custom = self.config_get('CUSTOM', config, split=False)
-
+            # Read the custom rules
+            self.custom = self.config_get('CUSTOM', config, split=False)
+        except MignisConfigException as e:
+            raise MignisException(self, 'Error in configuration file:\n' + str(e))
 
 # Argument parsing
 def parse_args():
@@ -1241,7 +1264,7 @@ def main():
 
     try:
         mignis = Mignis(args['config_file'], args['debug'], args['force'], args['dryrun'], args['write_rules_filename'], args['execute_rules'])
-    except (MignisException, MignisConfigException) as e:
+    except MignisException as e:
         print('\n[!] ' + str(e))
         sys.exit(-1)
     except:
