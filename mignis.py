@@ -1119,7 +1119,7 @@ class Mignis:
             while replace_again:
                 replace_again = False
                 for alias, val in self.aliases.iteritems():
-                    new_rule = re.sub('(?<={0}){1}(?={0})'.format('[^a-zA-Z0-9\-_]', alias), val, ' ' + rule + ' ')[1:-1]
+                    new_rule = self.alias_regexp[alias].sub(val, ' ' + rule + ' ')[1:-1]
                     if new_rule != rule:
                         replace_again = True
                         rule = new_rule
@@ -1142,22 +1142,20 @@ class Mignis:
                     i += 1
 
             # Add each expanded rule
-            allowed_chars = '[a-zA-Z0-9\./\*_\-:,\(\) ]'
-            rule_regexp = re.compile('^({0}+?)(?: +(\[{0}+?\]))? +(/|//|>|<>) +(?:(\[{0}+?\]) +)?({0}*?)(?: +({0}*?))?$'.format(allowed_chars))
             for rule in product(*rules):
                 rule = ''.join(rule)
 
                 # Replace known strings with aliases, for the abstract rule
                 abstract_rule = rule
                 for alias, val in self.aliases.iteritems():
-                    abstract_rule = re.sub('(?<={0}){1}(?={0})'.format('[^a-zA-Z0-9\-_]', val), alias, ' ' + abstract_rule + ' ')[1:-1]
+                    abstract_rule = self.inverse_alias_regexp[val].sub(alias, ' ' + abstract_rule + ' ')[1:-1]
                 abstract_rule = (abstract_rule + ' ' + params).strip()
 
                 if self.debug >= 3:
                     print("    expanded rule: {0}".format([abstract_rule, params]))
 
                 #rule = re.search('^(.*?) *(\[.*?\])? (/|//|>|<>) (\[.*?\])? *(.*?)$', rule)
-                rule = rule_regexp.search(rule)
+                rule = self.rule_regexp.search(rule)
                 if not rule:
                     raise MignisConfigException('bad firewall rule "{0}".'.format(rule))
                 rule = rule.groups()
@@ -1170,7 +1168,7 @@ class Mignis:
                 # Find and replace aliases inside params
                 if params:
                     for alias, val in self.aliases.iteritems():
-                        params = re.sub('(?<={0}){1}(?={0})'.format('[^a-zA-Z0-9\-_]', alias), val, ' ' + params + ' ')[1:-1]
+                        params = self.alias_regexp[alias].sub(val, ' ' + params + ' ')[1:-1]
                 
                 try:
                     if ruletype in ['/', '//']:
@@ -1264,6 +1262,19 @@ class Mignis:
             self.aliases = {}
             for x in aliases_list:
                 self.aliases[x[0]] = x[1]
+
+            # Compile aliases regexp
+            self.alias_regexp = {}
+            for alias, val in self.aliases.iteritems():
+                self.alias_regexp[alias] = re.compile('(?<={0}){1}(?={0})'.format('[^a-zA-Z0-9\-_]', alias))
+
+            self.inverse_alias_regexp = {}
+            for alias, val in self.aliases.iteritems():
+                self.inverse_alias_regexp[val] = re.compile('(?<={0}){1}(?={0})'.format('[^a-zA-Z0-9\-_]', val))
+
+            # Compile the rules regexp
+            allowed_chars = '[a-zA-Z0-9\./\*_\-:,\(\) ]'
+            self.rule_regexp = re.compile('^({0}+?)(?: +(\[{0}+?\]))? +(/|//|>|<>) +(?:(\[{0}+?\]) +)?({0}*?)(?: +({0}*?))?$'.format(allowed_chars))
 
             # Read the firewall rules
             if self.debug >= 2:
