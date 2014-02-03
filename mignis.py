@@ -929,42 +929,27 @@ class Mignis:
         '''Logging rules. We log the filter (input/output/forward) and mangle (prerouting only) tables
         '''
         self.wr('\n# Log')
-        self.add_iptables_rule('-N filter_drop')
-        self.add_iptables_rule('-N filter_drop_icmp')
-        self.add_iptables_rule('-N filter_drop_udp')
-        self.add_iptables_rule('-N filter_drop_tcp')
         self.add_iptables_rule('-t mangle -N mangle_drop')
-        self.add_iptables_rule('-t mangle -N mangle_drop_icmp')
-        self.add_iptables_rule('-t mangle -N mangle_drop_udp')
-        self.add_iptables_rule('-t mangle -N mangle_drop_tcp')
-
-        self.add_iptables_rule('-t mangle -A PREROUTING -j mangle_drop')
-        self.add_iptables_rule('-t mangle -A mangle_drop -p icmp -j mangle_drop_icmp')
-        self.add_iptables_rule('-t mangle -A mangle_drop_icmp -j LOG --log-prefix "MANGLE-DROP-ICMP "')
-        self.add_iptables_rule('-t mangle -A mangle_drop_icmp -j DROP')
-        self.add_iptables_rule('-t mangle -A mangle_drop -p udp -j mangle_drop_udp')
-        self.add_iptables_rule('-t mangle -A mangle_drop_udp -j LOG --log-prefix "MANGLE-DROP-UDP "')
-        self.add_iptables_rule('-t mangle -A mangle_drop_udp -j DROP')
-        self.add_iptables_rule('-t mangle -A mangle_drop -p tcp -j mangle_drop_tcp')
-        self.add_iptables_rule('-t mangle -A mangle_drop_tcp -j LOG --log-prefix "MANGLE-DROP-TCP "')
-        self.add_iptables_rule('-t mangle -A mangle_drop_tcp -j DROP')
+        for proto in ['icmp', 'udp', 'tcp']:
+            self.add_iptables_rule('-t mangle -N mangle_drop_{0}'.format(proto))
+            self.add_iptables_rule('-t mangle -A mangle_drop_{0} -j LOG --log-prefix "MANGLE-DROP-{1} "'.format(proto, proto.upper()))
+            self.add_iptables_rule('-t mangle -A mangle_drop_{0} -j DROP'.format(proto))
+            self.add_iptables_rule('-t mangle -A mangle_drop -p {0} -j mangle_drop_{0}'.format(proto))
         self.add_iptables_rule('-t mangle -A mangle_drop -j LOG --log-prefix "MANGLE-DROP-UNK "')
         self.add_iptables_rule('-t mangle -A mangle_drop -j DROP')
+        self.add_iptables_rule('-t mangle -A PREROUTING -j mangle_drop')
 
+        self.add_iptables_rule('-N filter_drop')
+        for proto in ['icmp', 'udp', 'tcp']:
+            self.add_iptables_rule('-N filter_drop_{0}'.format(proto))
+            self.add_iptables_rule('-A filter_drop_{0} -j LOG --log-prefix "DROP-{0} "'.format(proto, proto.upper()))
+            self.add_iptables_rule('-A filter_drop_{0} -j DROP'.format(proto))
+            self.add_iptables_rule('-A filter_drop -p {0} -j filter_drop_{0}'.format(proto))
+        self.add_iptables_rule('-A filter_drop -j LOG --log-prefix "DROP-UNK "')
+        self.add_iptables_rule('-A filter_drop -j DROP')
         self.add_iptables_rule('-A INPUT -j filter_drop')
         self.add_iptables_rule('-A OUTPUT -j filter_drop')
         self.add_iptables_rule('-A FORWARD -j filter_drop')
-        self.add_iptables_rule('-A filter_drop -p icmp -j filter_drop_icmp')
-        self.add_iptables_rule('-A filter_drop_icmp -j LOG --log-prefix "DROP-ICMP "')
-        self.add_iptables_rule('-A filter_drop_icmp -j DROP')
-        self.add_iptables_rule('-A filter_drop -p udp -j filter_drop_udp')
-        self.add_iptables_rule('-A filter_drop_udp -j LOG --log-prefix "DROP-UDP "')
-        self.add_iptables_rule('-A filter_drop_udp -j DROP')
-        self.add_iptables_rule('-A filter_drop -p tcp -j filter_drop_tcp')
-        self.add_iptables_rule('-A filter_drop_tcp -j LOG --log-prefix "DROP-TCP "')
-        self.add_iptables_rule('-A filter_drop_tcp -j DROP')
-        self.add_iptables_rule('-A filter_drop -j LOG --log-prefix "DROP-UNK "')
-        self.add_iptables_rule('-A filter_drop -j DROP')
 
     def query_rules(self, query):
         self.wr('\n\n## Executing query "{0}"'.format(query))
@@ -1195,7 +1180,7 @@ class Mignis:
             while config != old_config:
                 old_config = config
                 config = re.sub('(?<=\n)@include (.*?)(?=\n)', self.config_include, config)
-            print config
+
             # Split by section
             config = re.split('(OPTIONS|INTERFACES|ALIASES|FIREWALL|POLICIES|CUSTOM)\n', config)[1:]
             config = dict(zip(config[::2], config[1::2]))
