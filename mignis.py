@@ -11,7 +11,7 @@ $ ./mignis.py -h
 import operator
 import re
 import sys
-from ipaddr import IPv4Address, IPv4Network
+from ipaddr import IPv4Address, IPv4Network, AddressValueError
 from ipaddr_ext import IPv4Range
 import os
 import socket
@@ -155,11 +155,18 @@ class Rule:
     def ip2subnet(self, ip):
         '''Returns the alias of the subnet the ip is in, or None if not found
         '''
+        # TODO: fix this for 0.0.0.0/0. We are doing a hack here to exclude 0.0.0.0/0 and
+        # assign it only to an ip we don't know, which should be an external one in that case.
+        all_addresses = None
         for alias in self.mignis.intf:
-            if ip in self.mignis.intf[alias][1]:
+            subnet = self.mignis.intf[alias][1]
+            if subnet == IPv4Network('0.0.0.0/0'):
+                all_addresses = alias
+                continue
+            if ip in subnet:
                 return alias
         else:
-            return None
+            return all_addresses
 
     def _format_intfip(self, srcdst, direction, params, iponly=False, portonly=False):
         '''Given 'srcdst' (which specifies if we want a source (s) or destination (d) filter type),
@@ -345,6 +352,48 @@ class Rule:
 
         return True
 
+    def involves(self, query):
+        '''Given a query (an ip address, a subnet, an alias),
+        check if it is involved in the rule.
+        '''
+        # Replace aliases in the query
+        replace_again = True
+        while replace_again:
+            replace_again = False
+            for alias, val in self.mignis.aliases.iteritems():
+                new_query = re.sub('(?<={0}){1}(?={0})'.format('[^a-zA-Z0-9\-_]', alias), val, ' ' + query + ' ')[1:-1]
+                if new_query != query:
+                    replace_again = True
+                    query = new_query
+
+        try:
+            alias, interface, ip, port = self._expand_address((query, None))
+        except AddressValueError as e:
+            raise MignisException(self, 'Bad query "{0}"'.format(query))
+        
+        #print (alias, interface, ip)
+        #print self
+        #print
+
+        def check_involves(x):
+            xintf = x + '_intf'
+            xip = x + '_ip'
+            return (
+                (
+                    interface == self.params[xintf] or
+                    None in [interface, self.params[xintf]]
+                )
+                and
+                (   Rule.ip_isinside(ip, self.params[xip]) or
+                    Rule.ip_isinside(self.params[xip], ip) or
+                    None in [ip, self.params[xip]]
+                )
+            )
+
+        return check_involves('to') or check_involves('from') or (self.has_nat() and check_involves('nat'))
+
+    def has_nat(self):
+        return self.params['rtype'] in ['>D', '>S', '>M']
 
     ## Rule-translation functions
 
@@ -896,6 +945,7 @@ class Mignis:
         self.wr('\n## Custom rules')
         for rule in self.custom:
             # Search and replace aliases
+            # TODO: do this recursively
             for alias, val in self.aliases.iteritems():
                 '''
                 the re module, when using look-behind, requires a fixed-width pattern.
@@ -952,23 +1002,32 @@ class Mignis:
         self.add_iptables_rule('-A FORWARD -j filter_drop')
 
     def query_rules(self, query):
-        self.wr('\n\n## Executing query "{0}"'.format(query))
+        self.wr('\n## Executing query "{0}"'.format(query))
 
-        q_rulesdict = self.read_mignis_rules([[query]])
+        for (ruletype, rules) in self.fw_rulesdict.iteritems():
+            for rule in rules:
+                if rule.involves(query):
+                    print(rule.params['abstract'])
 
-        # Check if rules overlap
-        for (ruletype_a, rules_a) in q_rulesdict.iteritems():
-            if ruletype_a == '/': continue
-            for rule_a in rules_a:
-                for (ruletype_b, rules_b) in self.fw_rulesdict.iteritems():
-                    if ruletype_b == '/': continue
-                    for rule_b in rules_b:
-                        if rule_b is rule_a: continue
-                        # Check if rule_a and rule_b overlap
-                        if rule_b.overlaps(rule_a):
-                            print(rule_b.params['abstract'])
+        # TODO: do queries with rules too, so you can check if mypc > * overlaps with any rule
+        # and see all the rules that are involeved in mypc going out in any interface
 
-        self.wr('\n##\n')
+        #Rule.ip_isinside(query, rule)
+        #q_rulesdict = self.read_mignis_rules([[query]])
+
+        ## Check if rules overlap
+        #for (ruletype_a, rules_a) in q_rulesdict.iteritems():
+        #    if ruletype_a == '/': continue
+        #    for rule_a in rules_a:
+        #        for (ruletype_b, rules_b) in self.fw_rulesdict.iteritems():
+        #            if ruletype_b == '/': continue
+        #            for rule_b in rules_b:
+        #                if rule_b is rule_a: continue
+        #                # Check if rule_a and rule_b overlap
+        #                if rule_b.overlaps(rule_a):
+        #                    print(rule_b.params['abstract'])
+
+        self.wr('##')
 
     def config_get(self, what, config, split_separator='\s+', split_count=0, split=True):
         '''Read a configuration section. 'what' is the configuration section name,
@@ -1249,6 +1308,12 @@ def main():
 
     try:
         mignis = Mignis(args['config_file'], args['debug'], args['force'], args['dryrun'], args['write_rules_filename'], args['execute_rules'])
+
+        if args['query_rules']:
+            mignis.query_rules(args['query_rules'])
+        else:
+            mignis.all_rules()
+            mignis.apply_rules()
     except MignisException as e:
         print('\n[!] ' + str(e))
         sys.exit(-1)
@@ -1257,23 +1322,7 @@ def main():
         traceback.print_exc()
         sys.exit(-2)
 
-    if args['query_rules']:
-        mignis.query_rules(args['query_rules'])
-    else:
-        try:
-            mignis.all_rules()
-            mignis.apply_rules()
-        except MignisException as e:
-            print('\n[!] ' + str(e))
-            #mignis.reset_iptables()
-            sys.exit(-4)
-        except:
-            print('\n[!] An unexpected error occurred!')
-            traceback.print_exc()
-            #mignis.reset_iptables()
-            sys.exit(-5)
-
-        print('\n[*] Done.')
+    print('\n[*] Done.')
 
 
 if __name__ == '__main__':
