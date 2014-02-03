@@ -390,7 +390,7 @@ class Rule:
                 )
             )
 
-        return check_involves('to') or check_involves('from') or (self.has_nat() and check_involves('nat'))
+        return check_involves('from') or check_involves('to') or (self.has_nat() and check_involves('nat'))
 
     def has_nat(self):
         return self.params['rtype'] in ['>D', '>S', '>M']
@@ -1142,6 +1142,8 @@ class Mignis:
                     i += 1
 
             # Add each expanded rule
+            allowed_chars = '[a-zA-Z0-9\./\*_\-:,\(\) ]'
+            rule_regexp = re.compile('^({0}+?)(?: +(\[{0}+?\]))? +(/|//|>|<>) +(?:(\[{0}+?\]) +)?({0}*?)(?: +({0}*?))?$'.format(allowed_chars))
             for rule in product(*rules):
                 rule = ''.join(rule)
 
@@ -1154,9 +1156,8 @@ class Mignis:
                 if self.debug >= 3:
                     print("    expanded rule: {0}".format([abstract_rule, params]))
 
-                allowed_chars = '[a-zA-Z0-9\./\*_\-:,\(\) ]'
                 #rule = re.search('^(.*?) *(\[.*?\])? (/|//|>|<>) (\[.*?\])? *(.*?)$', rule)
-                rule = re.search('^({0}+?)(?: +(\[{0}+?\]))? +(/|//|>|<>) +(?:(\[{0}+?\]) +)?({0}*?)(?: +({0}*?))?$'.format(allowed_chars), rule)
+                rule = rule_regexp.search(rule)
                 if not rule:
                     raise MignisConfigException('bad firewall rule "{0}".'.format(rule))
                 rule = rule.groups()
@@ -1169,7 +1170,7 @@ class Mignis:
                 # Find and replace aliases inside params
                 if params:
                     for alias, val in self.aliases.iteritems():
-                        params = re.sub('(?<={0}){1}(?={0})'.format('[^a-zA-Z0-9\-_]', alias), val, params)
+                        params = re.sub('(?<={0}){1}(?={0})'.format('[^a-zA-Z0-9\-_]', alias), val, ' ' + params + ' ')[1:-1]
                 
                 try:
                     if ruletype in ['/', '//']:
