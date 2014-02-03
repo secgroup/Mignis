@@ -131,7 +131,7 @@ class Rule:
         elif ipsub in self.mignis.intf:
             alias = ipsub
             intf = self.mignis.intf[ipsub][0]
-            ip = IPv4Address('127.0.0.1') if ipsub == 'local' else None
+            ip = self.intf['local'][1] if ipsub == 'local' else None
         else:
             if '/' in ipsub:
                 # It's a custom subnet
