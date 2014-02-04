@@ -378,6 +378,7 @@ class Rule:
         def check_involves(x):
             xintf = x + '_intf'
             xip = x + '_ip'
+
             return (
                 (
                     interface == self.params[xintf] or
@@ -390,10 +391,36 @@ class Rule:
                 )
             )
 
-        return check_involves('from') or check_involves('to') or (self.has_nat() and check_involves('nat'))
+        return (check_involves('from') or
+                check_involves('to') or
+                ((self.is_dnat() or self.is_snat()) and check_involves('nat')))
+
+    def is_drop(self):
+        return self.params['rtype'] == '/'
+
+    def is_reject(self):
+        return self.params['rtype'] == '//'
+
+    def is_forward_dbl(self):
+        return self.params['rtype'] == '<>'
+
+    def is_forward(self):
+        return self.params['rtype'] == '>'
+
+    def is_dnat(self):
+        return self.params['rtype'] == '>D'
+
+    def is_snat(self):
+        return self.params['rtype'] == '>S'
+
+    def is_masquerade(self):
+        return self.params['rtype'] == '>M'
+
+    def is_sequence(self):
+        return self.params['rtype'] == '{'
 
     def has_nat(self):
-        return self.params['rtype'] in ['>D', '>S', '>M']
+        return self.is_dnat() or self.is_snat() or self.is_masquerade()
 
     ## Rule-translation functions
 
