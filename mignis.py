@@ -787,6 +787,7 @@ class Mignis:
         print('\n[*] Building rules')
         self.policies()
         self.mandatory_rules()
+        self.ignore_rules()
         if self.options['default_rules'] == 'yes':
             self.default_rules()
         self.firewall_rules()
@@ -814,6 +815,18 @@ class Mignis:
         self.add_iptables_rule('-P FORWARD DROP')
         self.add_iptables_rule('-P OUTPUT DROP')
         self.add_iptables_rule('-t mangle -P PREROUTING DROP')
+
+    def ignore_rules(self):
+        '''Ignore rules for each interface, if specified as an option
+        '''
+        self.wr('\n# Ignore rules')
+        for i_alias, (i_intf, i_subnet, i_options) in self.intf.items():
+            if 'ignore' in i_options:
+                self.add_iptables_rule('-A INPUT -i {0} -j ACCEPT -m comment --comment "ignore {0}"'.format(i_intf))
+                self.add_iptables_rule('-A OUTPUT -o {0} -j ACCEPT -m comment --comment "ignore {0}"'.format(i_intf))
+                self.add_iptables_rule('-A FORWARD -i {0} -j ACCEPT -m comment --comment "ignore {0}"'.format(i_intf))
+                self.add_iptables_rule('-A FORWARD -o {0} -j ACCEPT -m comment --comment "ignore {0}"'.format(i_intf))
+                self.add_iptables_rule('-t mangle -A PREROUTING -i {0} -j ACCEPT -m comment --comment "ignore {0}"'.format(i_intf))
 
     def default_rules(self):
         '''Default rules (usually safe, can be disabled using the -x switch)
@@ -947,13 +960,13 @@ class Mignis:
         self.wr('\n# IP/IF bind')
         allips = IPv4Network('0.0.0.0/0')
         for ipsub in self.intf.iterkeys():
-            subnet, ip = self.intf[ipsub]
+            subnet, ip, options = self.intf[ipsub]
             if ip == allips:
                 params = {'subnet': subnet, 'abstract': 'bind any ip to intf {0}'.format(subnet)}
                 # We exclude all the source IPs defined for the other interfaces
                 for other_ipsub in self.intf.iterkeys():
                     if other_ipsub == ipsub: continue
-                    other_subnet, other_ip = self.intf[other_ipsub]
+                    other_subnet, other_ip, other_options = self.intf[other_ipsub]
                     params['ip'] = other_ip
                     self.add_iptables_rule('-t mangle -A PREROUTING -i {subnet} -s {ip} -j DROP', params)
                 # Accept rule for all other IPs
@@ -1089,18 +1102,6 @@ class Mignis:
                         else:
                             # Insert sorted
                             bisect.insort(found_rules[side][ruletype], abstract_collapsed)
-
-                        ''' The code below doesn't work well with protocols, example output:
-                          From: local <> * (ah,esp,pim)
-                          local <> * ah
-                        but actually esp and pim match too.
-                        '''
-                        #if abstract == abstract_collapsed:
-                        #    print('{0}\n'.format(abstract_collapsed))
-                        #else:
-                        #    print('From: {0}\n{1}\n'.format(abstract_collapsed, abstract))
-
-        #print found_rules
 
         for side, rules in found_rules.items():
             has_rules_side = any(map(len, rules.values()))
@@ -1354,8 +1355,12 @@ class Mignis:
             # Read the interfaces
             intf = self.config_get('INTERFACES', config)
             for x in intf:
-                self.intf[x[0]] = (x[1], IPv4Network(x[2], strict=True))
-            self.intf['local'] = ('lo', IPv4Network('127.0.0.0/8', strict=True))
+                if len(x) < 3 or len(x) > 4:
+                    raise MignisConfigException('Bad interface declaration "{0}".'.format(' '.join(x)))
+                intf_alias, intf_name, intf_subnet = x[:3]
+                intf_options = x[3].split() if len(x) >= 4 else []
+                self.intf[intf_alias] = (intf_name, IPv4Network(intf_subnet, strict=True), intf_options)
+            self.intf['local'] = ('lo', IPv4Network('127.0.0.0/8', strict=True), [])
 
             # Read the aliases
             aliases_list = self.config_get('ALIASES', config, split_count=1)
