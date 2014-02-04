@@ -22,6 +22,7 @@ import traceback
 import string
 from itertools import product, groupby
 import tempfile
+import bisect
 
 
 class RuleException(Exception):
@@ -34,7 +35,7 @@ class Rule:
     # Dictionary with rule parameters
     params = {}
 
-    def __init__(self, mignis, abstract_rule, ruletype, r_from, r_to, protocol, filters, nat):
+    def __init__(self, mignis, abstract_rule, abstract_rule_collapsed, ruletype, r_from, r_to, protocol, filters, nat):
         self.mignis = mignis
 
         if filters is None:
@@ -47,13 +48,15 @@ class Rule:
         #filters, protocol = self._extract_protocol(filters)
 
         # Expand r_from, r_to and r_nat to aliases, interfaces, IPs and ports
-        from_alias, from_intf, from_ip, from_port = self._expand_address(r_from)
-        to_alias, to_intf, to_ip, to_port = self._expand_address(r_to)
-        nat_alias, nat_intf, nat_ip, nat_port = self._expand_address(nat) if nat else (None, None, None, None)
+        from_alias, from_intf, from_ip, from_port = self.expand_address(mignis, r_from)
+        to_alias, to_intf, to_ip, to_port = self.expand_address(mignis, r_to)
+        nat_alias, nat_intf, nat_ip, nat_port = self.expand_address(mignis, nat) if nat else (None, None, None, None)
 
         self.params = {
-            # The rule as written in the configuration file
+            # The rule as written in the configuration file (expanded)
             'abstract': abstract_rule,
+            # The rule as written in the configuration file (collapsed, might include lists)
+            'abstract_collapsed': abstract_rule_collapsed,
             # The type of rule, one of: /, //, >, <>, >S, >M, >D
             'rtype': ruletype,
             # Custom filters for the rule
@@ -78,12 +81,25 @@ class Rule:
     def __repr__(self):
         return pprint.pformat(self.params)
 
+    @staticmethod
+    def ruletype_str(ruletype):
+        if ruletype == '/': return 'Drop'
+        elif ruletype == '//': return 'Reject'
+        elif ruletype == '<>': return 'Forward (bidirectional)'
+        elif ruletype == '>': return 'Forward'
+        elif ruletype == '>D': return 'Destination Nat'
+        elif ruletype == '>M': return 'Masquerade'
+        elif ruletype == '>S': return 'Source Nat'
+        elif ruletype == '{': return 'Sequence'
+        else: raise RuleException('Invalid ruletype.')
+
     def _check_filters(self, filters):
         '''Verify that some options are not used inside filters.
         At the moment we look for:
         --dport, --dports, --destination-port, --destination-ports,
         --sport, --sports, --source-port, --source-ports,
         -s, --source, -d, --destination,
+        -p, --protocol,
         -j, -C, -S, -F, -L, -Z, -N, -X, -P, -E
         '''
         check_regexp = ('( |\A)('
@@ -118,8 +134,9 @@ class Rule:
     #    else:
     #        protocol = None
     #    return filters, protocol
-            
-    def _expand_address(self, addr):
+    
+    @staticmethod
+    def expand_address(mignis, addr):
         '''Given an address in the form ([*|interface|ip|subnet], port)
         a tuple containing (alias, interface, ip, port) is returned.
         Note that ip can be either an IPv4Address, a list of IP addresses
@@ -128,11 +145,11 @@ class Rule:
         ipsub, port = addr
         if ipsub == '*':
             alias = intf = ip = None
-        elif ipsub in self.mignis.intf:
+        elif ipsub in mignis.intf:
             alias = ipsub
-            intf = self.mignis.intf[ipsub][0]
+            intf = mignis.intf[ipsub][0]
             # TODO: why only local has a subnet? every intf does have one.
-            ip = self.mignis.intf['local'][1] if ipsub == 'local' else None
+            ip = mignis.intf['local'][1] if ipsub == 'local' else None
         else:
             if '/' in ipsub:
                 # It's a custom subnet
@@ -144,23 +161,24 @@ class Rule:
                 #ip = map(IPv4Address, ipsub.split('-'))
                 ip = IPv4Range(ipsub)
                 #if len(ip) != 2:
-                #    raise MignisException(self, 'The range "{0}" is invalid.'.format(ipsub))
+                #    raise Mignis.intfException(self, 'The range "{0}" is invalid.'.format(ipsub))
             else:
                 ip = IPv4Address(ipsub)
-                alias = self.ip2subnet(ip)
+                alias = Rule.ip2subnet(mignis, ip)
                 if alias is None:
                     raise MignisException(self, 'The IP address "{0}" does not belong to any subnet.'.format(ipsub))
-                intf = self.mignis.intf[alias][0]
+                intf = mignis.intf[alias][0]
         return (alias, intf, ip, port)
 
-    def ip2subnet(self, ip):
+    @staticmethod
+    def ip2subnet(mignis, ip):
         '''Returns the alias of the subnet the ip is in, or None if not found
         '''
         # TODO: fix this for 0.0.0.0/0. We are doing a hack here to exclude 0.0.0.0/0 and
         # assign it only to an ip we don't know, which should be an external one in that case.
         all_addresses = None
-        for alias in self.mignis.intf:
-            subnet = self.mignis.intf[alias][1]
+        for alias in mignis.intf:
+            subnet = mignis.intf[alias][1]
             if subnet == IPv4Network('0.0.0.0/0'):
                 all_addresses = alias
                 continue
@@ -353,29 +371,10 @@ class Rule:
 
         return True
 
-    def involves(self, query):
-        '''Given a query (an ip address, a subnet, an alias),
+    def involves(self, alias, interface, ip):
+        '''Given an alias, interface and ip
         check if it is involved in the rule.
         '''
-        # Replace aliases in the query
-        replace_again = True
-        while replace_again:
-            replace_again = False
-            for alias, val in self.mignis.aliases.iteritems():
-                new_query = re.sub('(?<={0}){1}(?={0})'.format('[^a-zA-Z0-9\-_]', alias), val, ' ' + query + ' ')[1:-1]
-                if new_query != query:
-                    replace_again = True
-                    query = new_query
-
-        try:
-            alias, interface, ip, port = self._expand_address((query, None))
-        except AddressValueError as e:
-            raise MignisException(self, 'Bad query "{0}"'.format(query))
-        
-        #print (alias, interface, ip)
-        #print self
-        #print
-
         def check_involves(x):
             xintf = x + '_intf'
             xip = x + '_ip'
@@ -873,16 +872,7 @@ class Mignis:
         formatted as iptables rules.
         "rules" is the dictionary containing lists of Rule objects.
         '''
-        new_rules = {
-            '/': [],
-            '//': [],
-            '>': [],
-            '<>': [],
-            '>S': [],
-            '>M': [],
-            '>D': [],
-            '{': [],
-        }
+        new_rules = {'/':[], '//':[], '>':[], '<>':[], '>S':[], '>M':[], '>D':[], '{':[]}
 
         # No optimizations at the moment.
         for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S', '{']:
@@ -1018,10 +1008,57 @@ class Mignis:
     def query_rules(self, query):
         self.wr('\n## Executing query "{0}"'.format(query))
 
-        for (ruletype, rules) in self.fw_rulesdict.iteritems():
-            for rule in rules:
-                if rule.involves(query):
-                    print(rule.params['abstract'])
+        # Replace aliases in the query
+        replace_again = True
+        while replace_again:
+            replace_again = False
+            for alias, val in self.aliases.iteritems():
+                new_query = self.alias_regexp[alias].sub(val, ' ' + query + ' ')[1:-1]
+                if new_query != query:
+                    replace_again = True
+                    query = new_query
+
+        # Extract alias, interface and ip
+        try:
+            query_alias, query_interface, query_ip = Rule.expand_address(self, (query, None))[:3]
+        except AddressValueError as e:
+            raise MignisException(self, 'Bad query "{0}"'.format(query))
+        
+        print('\n[*] Query:\n  alias: {0}\n  intf:  {1}\n  ip:    {2}'.format(query_alias, query_interface, query_ip))
+
+        print('\n[*] Results')
+        # For each rule, check if it involves query and print the collapsed version of the rule
+        # along with the single rule.
+        # It avoids writing the same collapsed rule multiple times.
+        found_rules = {'/':[], '//':[], '>':[], '<>':[], '>S':[], '>M':[], '>D':[], '{':[]}
+        for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S', '{']:
+            for rule in self.fw_rulesdict[ruletype]:
+                abstract_collapsed = rule.params['abstract_collapsed']
+                if abstract_collapsed in found_rules[ruletype]: continue
+                abstract = rule.params['abstract']
+                if rule.involves(query_alias, query_interface, query_ip):
+                    if ruletype == '{':
+                        # Insert in sequence order
+                        found_rules[ruletype].append(abstract_collapsed)
+                    else:
+                        # Insert sorted
+                        bisect.insort(found_rules[ruletype], abstract_collapsed)
+
+                    ''' The code below doesn't work well with protocols, example output:
+                      From: local <> * (ah,esp,pim)
+                      local <> * ah
+                    but actually esp and pim match too.
+                    '''
+                    #if abstract == abstract_collapsed:
+                    #    print('{0}\n'.format(abstract_collapsed))
+                    #else:
+                    #    print('From: {0}\n{1}\n'.format(abstract_collapsed, abstract))
+
+        for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S', '{']:
+            has_rules = len(found_rules[ruletype])
+            if has_rules: print('\n## {0}:'.format(Rule.ruletype_str(ruletype)))
+            for rule in found_rules[ruletype]: print(rule)
+            if has_rules: print('##')
 
         # TODO: do queries with rules too, so you can check if mypc > * overlaps with any rule
         # and see all the rules that are involeved in mypc going out in any interface
@@ -1095,16 +1132,7 @@ class Mignis:
         return r
 
     def read_mignis_rules(self, abstract_rules):
-        rulesdict = {
-            '/': [],
-            '//': [],
-            '>': [],
-            '<>': [],
-            '>S': [],
-            '>M': [],
-            '>D': [],
-            '{': [],
-        }
+        rulesdict = {'/':[], '//':[], '>':[], '<>':[], '>S':[], '>M':[], '>D':[], '{':[]}
 
         # Expand lists inside each abstract_rule and add each expanded rule
         # (at the moment we don't expand params)
@@ -1156,6 +1184,7 @@ class Mignis:
                     i += 1
 
             # Add each expanded rule
+            abstract_rule_collapsed = ' '.join(abstract_rule)
             for rule in product(*rules):
                 rule = ''.join(rule)
 
@@ -1187,10 +1216,10 @@ class Mignis:
                 try:
                     if ruletype in ['/', '//']:
                         # Deny
-                        r = Rule(self, abstract_rule, ruletype, r_from, r_to, protocol, params, None)
+                        r = Rule(self, abstract_rule, abstract_rule_collapsed, ruletype, r_from, r_to, protocol, params, None)
                     elif ruletype == '<>':
                         # Forward
-                        r = Rule(self, abstract_rule, ruletype, r_from, r_to, protocol, params, None)
+                        r = Rule(self, abstract_rule, abstract_rule_collapsed, ruletype, r_from, r_to, protocol, params, None)
                     elif ruletype == '>':
                         if r_nat_left and r_nat_right:
                             raise MignisConfigException('bad firewall rule in configuration file.')
@@ -1199,20 +1228,20 @@ class Mignis:
                             if r_nat_left == '[.]':
                                 # Masquerade
                                 ruletype = '>M'
-                                r = Rule(self, abstract_rule, ruletype, r_from, r_to, protocol, params, None)
+                                r = Rule(self, abstract_rule, abstract_rule_collapsed, ruletype, r_from, r_to, protocol, params, None)
                             else:
                                 # Classic SNAT
                                 ruletype = '>S'
                                 nat = self.config_split_ipport(r_nat_left[1:-1])
-                                r = Rule(self, abstract_rule, ruletype, r_from, r_to, protocol, params, nat)
+                                r = Rule(self, abstract_rule, abstract_rule_collapsed, ruletype, r_from, r_to, protocol, params, nat)
                         elif r_nat_right:
                             # DNAT
                             ruletype = '>D'
                             nat = self.config_split_ipport(r_nat_right[1:-1])
-                            r = Rule(self, abstract_rule, ruletype, r_from, r_to, protocol, params, nat)
+                            r = Rule(self, abstract_rule, abstract_rule_collapsed, ruletype, r_from, r_to, protocol, params, nat)
                         else:
                             # Forward
-                            r = Rule(self, abstract_rule, ruletype, r_from, r_to, protocol, params, None)
+                            r = Rule(self, abstract_rule, abstract_rule_collapsed, ruletype, r_from, r_to, protocol, params, None)
                     else:
                         raise MignisConfigException('bad firewall rule in configuration file.')
                 except RuleException as e:
