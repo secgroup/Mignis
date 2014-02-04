@@ -961,6 +961,9 @@ class Mignis:
         allips = IPv4Network('0.0.0.0/0')
         for ipsub in self.intf.iterkeys():
             subnet, ip, options = self.intf[ipsub]
+            # If the "ignore" option is set, we don't need an ip/if bind
+            # since the packets are already accepted by the rules set in ignore_rules()
+            if 'ignore' in options: continue
             if ip == allips:
                 params = {'subnet': subnet, 'abstract': 'bind any ip to intf {0}'.format(subnet)}
                 # We exclude all the source IPs defined for the other interfaces
