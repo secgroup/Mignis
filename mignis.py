@@ -394,9 +394,15 @@ class Rule:
         # TODO: should "local" be involved by a rule with masquerade?
         # we skip masquerade at the moment! we should at least check if the ip
         # is one defined in the interfaces (when this will be added to interfaces...)
-        return (check_involves('from') or
-                check_involves('to') or
-                ((self.is_dnat() or self.is_snat()) and check_involves('nat')))
+
+        checks = {
+            'from': check_involves('from'),
+            'to': check_involves('to'),
+            'dnat': self.is_dnat() and check_involves('nat'),
+            'snat': self.is_snat() and check_involves('nat'),
+        }
+
+        return (any(checks.values()), checks)
 
     def is_drop(self):
         return self.params['rtype'] == '/'
@@ -1044,7 +1050,10 @@ class Mignis:
             raise MignisException(self, 'Bad query "{0}"'.format(query))
         query_exp = query_exp[0]
 
-        found_rules = {'/':[], '//':[], '>':[], '<>':[], '>S':[], '>M':[], '>D':[], '{':[]}
+        found_rules = {}
+        for sides in ['from', 'to', 'dnat', 'snat']:
+            found_rules[sides] = {'/':[], '//':[], '>':[], '<>':[], '>S':[], '>M':[], '>D':[], '{':[]}
+
         query_len = len(query_exp)
         if query_len > 1:
             print('\n[*] Query:\n  {0}'.format(pprint.pformat(query_exp)))
@@ -1068,15 +1077,18 @@ class Mignis:
             for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S', '{']:
                 for rule in self.fw_rulesdict[ruletype]:
                     abstract_collapsed = rule.params['abstract_collapsed']
-                    if abstract_collapsed in found_rules[ruletype]: continue
                     abstract = rule.params['abstract']
-                    if rule.involves(query_alias, query_interface, query_ip):
+                    involve_check, involves = rule.involves(query_alias, query_interface, query_ip)
+                    for side, inv in involves.items():
+                        if not inv: continue
+                        if abstract_collapsed in found_rules[side][ruletype]: continue
+
                         if ruletype == '{':
                             # Insert in sequence order
-                            found_rules[ruletype].append(abstract_collapsed)
+                            found_rules[side][ruletype].append(abstract_collapsed)
                         else:
                             # Insert sorted
-                            bisect.insort(found_rules[ruletype], abstract_collapsed)
+                            bisect.insort(found_rules[side][ruletype], abstract_collapsed)
 
                         ''' The code below doesn't work well with protocols, example output:
                           From: local <> * (ah,esp,pim)
@@ -1088,11 +1100,17 @@ class Mignis:
                         #else:
                         #    print('From: {0}\n{1}\n'.format(abstract_collapsed, abstract))
 
-        for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S', '{']:
-            has_rules = len(found_rules[ruletype])
-            if has_rules: print('\n## {0}:'.format(Rule.ruletype_str(ruletype)))
-            for rule in found_rules[ruletype]: print(rule)
-            if has_rules: print('##')
+        #print found_rules
+
+        for side, rules in found_rules.items():
+            has_rules_side = any(map(len, rules.values()))
+            if has_rules_side: print('\n#### {0}'.format(side).upper())
+            for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S', '{']:
+                has_rules = len(rules[ruletype])
+                if has_rules: print('\n## {0}:'.format(Rule.ruletype_str(ruletype)))
+                for rule in rules[ruletype]: print(rule)
+                if has_rules: print('##')
+            if has_rules_side: print('\n####')
 
         # TODO: do queries with rules too, so you can check if mypc > * overlaps with any rule
         # and see all the rules that are involeved in mypc going out in any interface
