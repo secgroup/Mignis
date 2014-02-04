@@ -391,6 +391,9 @@ class Rule:
                 )
             )
 
+        # TODO: should "local" be involved by a rule with masquerade?
+        # we skip masquerade at the moment! we should at least check if the ip
+        # is one defined in the interfaces (when this will be added to interfaces...)
         return (check_involves('from') or
                 check_involves('to') or
                 ((self.is_dnat() or self.is_snat()) and check_involves('nat')))
@@ -1033,53 +1036,57 @@ class Mignis:
         self.add_iptables_rule('-A FORWARD -j filter_drop')
 
     def query_rules(self, query):
+        # TODO: what about custom rules? and policies?
         self.wr('\n## Executing query "{0}"'.format(query))
 
-        # Replace aliases in the query
-        replace_again = True
-        while replace_again:
-            replace_again = False
-            for alias, val in self.aliases.iteritems():
-                new_query = self.alias_regexp[alias].sub(val, ' ' + query + ' ')[1:-1]
-                if new_query != query:
-                    replace_again = True
-                    query = new_query
-
-        # Extract alias, interface and ip
-        try:
-            query_alias, query_interface, query_ip = Rule.expand_address(self, (query, None))[:3]
-        except AddressValueError as e:
+        query_exp = self.expand_rule(query)
+        if len(query_exp) != 1 or len(query_exp[0]) == 0:
             raise MignisException(self, 'Bad query "{0}"'.format(query))
-        
-        print('\n[*] Query:\n  alias: {0}\n  intf:  {1}\n  ip:    {2}'.format(query_alias, query_interface, query_ip))
+        query_exp = query_exp[0]
 
-        print('\n[*] Results')
-        # For each rule, check if it involves query and print the collapsed version of the rule
-        # along with the single rule.
-        # It avoids writing the same collapsed rule multiple times.
         found_rules = {'/':[], '//':[], '>':[], '<>':[], '>S':[], '>M':[], '>D':[], '{':[]}
-        for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S', '{']:
-            for rule in self.fw_rulesdict[ruletype]:
-                abstract_collapsed = rule.params['abstract_collapsed']
-                if abstract_collapsed in found_rules[ruletype]: continue
-                abstract = rule.params['abstract']
-                if rule.involves(query_alias, query_interface, query_ip):
-                    if ruletype == '{':
-                        # Insert in sequence order
-                        found_rules[ruletype].append(abstract_collapsed)
-                    else:
-                        # Insert sorted
-                        bisect.insort(found_rules[ruletype], abstract_collapsed)
+        query_len = len(query_exp)
+        if query_len > 1:
+            print('\n[*] Query:\n  {0}'.format(pprint.pformat(query_exp)))
 
-                    ''' The code below doesn't work well with protocols, example output:
-                      From: local <> * (ah,esp,pim)
-                      local <> * ah
-                    but actually esp and pim match too.
-                    '''
-                    #if abstract == abstract_collapsed:
-                    #    print('{0}\n'.format(abstract_collapsed))
-                    #else:
-                    #    print('From: {0}\n{1}\n'.format(abstract_collapsed, abstract))
+        # If we have a list, we will loop for each item in the list
+        for q_exp in query_exp:
+            # Extract alias, interface and ip
+            try:
+                query_alias, query_interface, query_ip = Rule.expand_address(self, (q_exp, None))[:3]
+            except AddressValueError as e:
+                raise MignisException(self, 'Bad query "{0}"'.format(query))
+            
+            if query_len == 1:
+                print('\n[*] Query:\n  alias: {0}\n  intf:  {1}\n  ip:    {2}'
+                    .format(query_alias, query_interface, query_ip))
+                print('\n[*] Results')
+
+            # For each rule, check if it involves query and print the collapsed version of the rule
+            # along with the single rule.
+            # It avoids writing the same collapsed rule multiple times.
+            for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S', '{']:
+                for rule in self.fw_rulesdict[ruletype]:
+                    abstract_collapsed = rule.params['abstract_collapsed']
+                    if abstract_collapsed in found_rules[ruletype]: continue
+                    abstract = rule.params['abstract']
+                    if rule.involves(query_alias, query_interface, query_ip):
+                        if ruletype == '{':
+                            # Insert in sequence order
+                            found_rules[ruletype].append(abstract_collapsed)
+                        else:
+                            # Insert sorted
+                            bisect.insort(found_rules[ruletype], abstract_collapsed)
+
+                        ''' The code below doesn't work well with protocols, example output:
+                          From: local <> * (ah,esp,pim)
+                          local <> * ah
+                        but actually esp and pim match too.
+                        '''
+                        #if abstract == abstract_collapsed:
+                        #    print('{0}\n'.format(abstract_collapsed))
+                        #else:
+                        #    print('From: {0}\n{1}\n'.format(abstract_collapsed, abstract))
 
         for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S', '{']:
             has_rules = len(found_rules[ruletype])
@@ -1158,6 +1165,37 @@ class Mignis:
             r[1] = ports
         return r
 
+    def expand_rule(self, rule):
+        # Convert aliases
+        # TODO: this is truly ugly. Do a better replacement for aliases
+        replace_again = True
+        while replace_again:
+            replace_again = False
+            for alias, val in self.aliases.iteritems():
+                new_rule = self.alias_regexp[alias].sub(val, ' ' + rule + ' ')[1:-1]
+                if new_rule != rule:
+                    replace_again = True
+                    rule = new_rule
+
+        # Create a list of lists, splitting on ", *" for each list found.
+        # Each list is written using "(item1, item2, ...)".
+        rules = map(lambda x: re.split(', *', x), filter(None, re.split('[()]', rule)))
+
+        # Flatten lists of lists
+        # there is a list of lists if an the first or last element of an inner list is ''
+        i = 0
+        while i < len(rules):
+            if rules[i][-1] == '':
+                rules[i] = rules[i][:-1]
+                if rules[i+1]:
+                    rules[i] += rules.pop(i+1)
+            elif rules[i][0] == '':
+                rules[i-1] += rules.pop(i)[1:]
+            else:
+                i += 1
+
+        return rules
+
     def read_mignis_rules(self, abstract_rules):
         rulesdict = {'/':[], '//':[], '>':[], '<>':[], '>S':[], '>M':[], '>D':[], '{':[]}
 
@@ -1176,39 +1214,13 @@ class Mignis:
                 inside_sequence = False
                 continue
             
-            if self.debug >= 3:
-                print('Expanding rule {0}'.format(abstract_rule))
-
             rule = abstract_rule[0]
             params = abstract_rule[1] if len(abstract_rule) > 1 else ''
 
-            # Convert aliases
-            # TODO: this is truly ugly. Do a better replacement for aliases
-            replace_again = True
-            while replace_again:
-                replace_again = False
-                for alias, val in self.aliases.iteritems():
-                    new_rule = self.alias_regexp[alias].sub(val, ' ' + rule + ' ')[1:-1]
-                    if new_rule != rule:
-                        replace_again = True
-                        rule = new_rule
+            if self.debug >= 3:
+                print('Expanding rule {0}'.format(abstract_rule))
 
-            # Create a list of lists, splitting on ", *" for each list found.
-            # Each list is written using "(item1, item2, ...)".
-            rules = map(lambda x: re.split(', *', x), filter(None, re.split('[()]', rule)))
-
-            # Flatten lists of lists
-            # there is a list of lists if an the first or last element of an inner list is ''
-            i = 0
-            while i < len(rules):
-                if rules[i][-1] == '':
-                    rules[i] = rules[i][:-1]
-                    if rules[i+1]:
-                        rules[i] += rules.pop(i+1)
-                elif rules[i][0] == '':
-                    rules[i-1] += rules.pop(i)[1:]
-                else:
-                    i += 1
+            rules = self.expand_rule(rule)
 
             # Add each expanded rule
             abstract_rule_collapsed = ' '.join(abstract_rule)
@@ -1245,7 +1257,7 @@ class Mignis:
                         # Deny
                         r = Rule(self, abstract_rule, abstract_rule_collapsed, ruletype, r_from, r_to, protocol, params, None)
                     elif ruletype == '<>':
-                        # Forward
+                        # Bidirectional forward
                         r = Rule(self, abstract_rule, abstract_rule_collapsed, ruletype, r_from, r_to, protocol, params, None)
                     elif ruletype == '>':
                         if r_nat_left and r_nat_right:
