@@ -131,6 +131,7 @@ class Rule:
         elif ipsub in self.mignis.intf:
             alias = ipsub
             intf = self.mignis.intf[ipsub][0]
+            # TODO: why only local has a subnet? every intf does have one.
             ip = self.mignis.intf['local'][1] if ipsub == 'local' else None
         else:
             if '/' in ipsub:
@@ -943,34 +944,47 @@ class Mignis:
         corresponding value.
         '''
         self.wr('\n## Custom rules')
+
+        # Compile the regular expressions
+        regexp_alias = {}
+        for alias in self.aliases.iterkeys():
+            for switch in ['-d ', '-s ', '--destination ', '--source ']:
+                regexp_alias.setdefault(alias, []).append(re.compile('(?<={0}){1}(?={2})'.format(switch, alias, '[^a-zA-Z0-9\-_]')))
+        regexp_intf = {}
+        for alias in self.intf:
+            for switch in ['-i ', '-o ', '--in-interface ', '--out-interface ']:
+                regexp_intf.setdefault(alias, []).append(re.compile('(?<={0}){1}(?={2})'.format(switch, alias, '[^a-zA-Z0-9\-_]')))
+
+        # For each rule, search and replace aliases recursively
         for rule in self.custom:
-            # Search and replace aliases
-            # TODO: do this recursively
-            for alias, val in self.aliases.iteritems():
-                '''
-                the re module, when using look-behind, requires a fixed-width pattern.
-                the regex module allows variable-width patterns and thus the following
-                for loop can be replaced by this line:
-                switch = '(-d|-s|--destination|--source) '
-                rule = re.sub(
-                            '(?<={0}){1}(?={2})'.format(switch, alias, '[^a-zA-Z0-9\-_]'),
-                            val,
-                            rule)
-                when the regex module will replace re, we can change this code.
-                '''
-                for switch in ['-d ', '-s ', '--destination ', '--source ']:
+            replace_again = True
+            while replace_again:
+                replace_again = False
+                for alias, val in self.aliases.iteritems():
+                    '''
+                    the re module, when using look-behind, requires a fixed-width pattern.
+                    the regex module allows variable-width patterns and thus the following
+                    for loop can be replaced by this line:
+                    switch = '(-d|-s|--destination|--source) '
                     rule = re.sub(
                                 '(?<={0}){1}(?={2})'.format(switch, alias, '[^a-zA-Z0-9\-_]'),
                                 val,
                                 rule)
-            # Search and replace interface aliases
-            for alias in self.intf:
-                subnet = self.intf[alias][0]
-                for switch in ['-i ', '-o ', '--in-interface ', '--out-interface ']:
-                    rule = re.sub(
-                                '(?<={0}){1}(?={2})'.format(switch, alias, '[^a-zA-Z0-9\-_]'),
-                                subnet,
-                                rule)
+                    when the regex module will replace re, we can change this code.
+                    '''
+                    for n, switch in enumerate(['-d ', '-s ', '--destination ', '--source ']):
+                        new_rule = regexp_alias[alias][n].sub(val, rule)
+                        if new_rule != rule:
+                            replace_again = True
+                            rule = new_rule
+                # Search and replace interface aliases
+                for alias in self.intf:
+                    subnet = self.intf[alias][0]
+                    for n, switch in enumerate(['-i ', '-o ', '--in-interface ', '--out-interface ']):
+                        new_rule = regexp_intf[alias][n].sub(subnet, rule)
+                        if new_rule != rule:
+                            replace_again = True
+                            rule = new_rule
 
             self.add_iptables_rule(rule)
         self.wr('\n##\n')
