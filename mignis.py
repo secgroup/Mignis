@@ -978,6 +978,11 @@ class Mignis:
                 # Accept rule for all other IPs
                 self.add_iptables_rule('-t mangle -A PREROUTING -i {subnet} -j ACCEPT', params)
             else:
+                # We can't force 127.0.0.0/8 on local, since packets with other
+                # destinations may arrive.
+                # e.g. when pinging an host which is not reachable we get a packet in mangle
+                # with source and destination set as the pinged ip.
+                if ipsub == 'local': continue
                 params = { 'subnet': subnet, 
                            'ip': ip, 
                            'abstract': 'bind ip {0} to intf {1}'.format(ip, subnet) }
