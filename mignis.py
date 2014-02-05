@@ -964,25 +964,28 @@ class Mignis:
             # If the "ignore" option is set, we don't need an ip/if bind
             # since the packets are already accepted by the rules set in ignore_rules()
             if 'ignore' in options: continue
-            if ip == allips:
+
+            # We can't force 127.0.0.0/8 on local, since packets with other
+            # destinations may arrive.
+            # e.g. when pinging an host which is not reachable we get a packet in mangle
+            # with source and destination set as the pinged ip.
+            # So we bind it to any ip, like we do for 0.0.0.0/0
+
+            if ip == allips or ipsub == 'local':
                 params = {'subnet': subnet, 'abstract': 'bind any ip to intf {0}'.format(subnet)}
-                # We exclude all the source IPs defined for the other interfaces
-                for other_ipsub in self.intf.iterkeys():
-                    # Skip if itself
-                    if other_ipsub == ipsub: continue
-                    other_subnet, other_ip, other_options = self.intf[other_ipsub]
-                    # Skip if the interface has no ip
-                    if other_ip == None: continue
-                    params['ip'] = other_ip
-                    self.add_iptables_rule('-t mangle -A PREROUTING -i {subnet} -s {ip} -j DROP', params)
+                if ipsub != 'local':
+                    # We exclude all the source IPs defined for the other interfaces
+                    for other_ipsub in self.intf.iterkeys():
+                        # Skip if itself
+                        if other_ipsub == ipsub: continue
+                        other_subnet, other_ip, other_options = self.intf[other_ipsub]
+                        # Skip if the interface has no ip
+                        if other_ip == None: continue
+                        params['ip'] = other_ip
+                        self.add_iptables_rule('-t mangle -A PREROUTING -i {subnet} -s {ip} -j DROP', params)
                 # Accept rule for all other IPs
                 self.add_iptables_rule('-t mangle -A PREROUTING -i {subnet} -j ACCEPT', params)
             else:
-                # We can't force 127.0.0.0/8 on local, since packets with other
-                # destinations may arrive.
-                # e.g. when pinging an host which is not reachable we get a packet in mangle
-                # with source and destination set as the pinged ip.
-                if ipsub == 'local': continue
                 params = { 'subnet': subnet, 
                            'ip': ip, 
                            'abstract': 'bind ip {0} to intf {1}'.format(ip, subnet) }
