@@ -182,7 +182,7 @@ class Rule:
             if subnet == IPv4Network('0.0.0.0/0'):
                 all_addresses = alias
                 continue
-            if ip in subnet:
+            if subnet and ip in subnet:
                 return alias
         else:
             return all_addresses
@@ -968,8 +968,11 @@ class Mignis:
                 params = {'subnet': subnet, 'abstract': 'bind any ip to intf {0}'.format(subnet)}
                 # We exclude all the source IPs defined for the other interfaces
                 for other_ipsub in self.intf.iterkeys():
+                    # Skip if itself
                     if other_ipsub == ipsub: continue
                     other_subnet, other_ip, other_options = self.intf[other_ipsub]
+                    # Skip if the interface has no ip
+                    if other_ip == None: continue
                     params['ip'] = other_ip
                     self.add_iptables_rule('-t mangle -A PREROUTING -i {subnet} -s {ip} -j DROP', params)
                 # Accept rule for all other IPs
@@ -1362,7 +1365,8 @@ class Mignis:
                     raise MignisConfigException('Bad interface declaration "{0}".'.format(' '.join(x)))
                 intf_alias, intf_name, intf_subnet = x[:3]
                 intf_options = x[3].split() if len(x) >= 4 else []
-                self.intf[intf_alias] = (intf_name, IPv4Network(intf_subnet, strict=True), intf_options)
+                intf_subnet = None if intf_subnet == 'none' else IPv4Network(intf_subnet, strict=True)
+                self.intf[intf_alias] = (intf_name, intf_subnet, intf_options)
             self.intf['local'] = ('lo', IPv4Network('127.0.0.0/8', strict=True), [])
 
             # Read the aliases
