@@ -591,6 +591,7 @@ class Rule:
             params['chain'] = 'PREROUTING'
 
         params['destination'] = self._format_intfip('d', 'nat', params, iponly=True)
+        # TODO: verify that to_ip is not None.
         params['nat'] = str(params['to_ip'])
         if params['to_port']:
             params['nat'] += ':' + '-'.join(map(str, params['to_port']))
@@ -969,7 +970,7 @@ class Mignis:
             # destinations may arrive.
             # e.g. when pinging an host which is not reachable we get a packet in mangle
             # with source and destination set as the pinged ip.
-            # So we bind it to any ip, like we do for 0.0.0.0/0
+            # So we bind local to any ip, like we do for 0.0.0.0/0
 
             if ip == allips or ipsub == 'local':
                 params = {'subnet': subnet, 'abstract': 'bind any ip to intf {0}'.format(subnet)}
