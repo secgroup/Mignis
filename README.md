@@ -80,8 +80,9 @@ ext > [router_ext_ip:8888] mypc:8888  udp
 ext > local:80  tcp
 
 CUSTOM
-# ssh
--A INPUT -p tcp --dport 22 -j ACCEPT
+# log and accept packets on port 7792
+iptables -A INPUT -p tcp --dport 7792 -j LOG --log-prefix "PORT 7792 "
+iptables -A INPUT -p tcp --dport 7792 -j ACCEPT
 ```
 
 Each configuration file needs 4 sections:
