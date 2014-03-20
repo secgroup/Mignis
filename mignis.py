@@ -830,7 +830,8 @@ class Mignis:
                 self.add_iptables_rule('-t mangle -A PREROUTING -i {0} -j ACCEPT -m comment --comment "ignore {0}"'.format(i_intf))
 
     def default_rules(self):
-        '''Default rules (usually safe, can be disabled using the -x switch)
+        '''Default rules.
+        Usually safe, they can be disabled using "default_rules no" in the configuration's options section.
         '''
         self.wr('\n# Default rules')
         # Loopback
@@ -1428,7 +1429,7 @@ def parse_args():
     group_action = parser.add_mutually_exclusive_group(required=True)
     group_action.add_argument('-w', dest='write_rules_filename', metavar='filename', help='write the rules to file', required=False)
     group_action.add_argument('-e', dest='execute_rules', help='execute the rules without writing to file', required=False, action='store_true')
-    group_action.add_argument('-q', dest='query_rules', metavar='query', help='perform a query over the configuration', required=False)
+    group_action.add_argument('-q', dest='query_rules', metavar='query', help='perform a query over the configuration (unstable)', required=False)
     parser.add_argument('-d', dest='debug', help='set debugging output level (0-2)', required=False, type=int, default=0, choices=range(4))
     parser.add_argument('-n', dest='dryrun', help='do not execute/write the rules (dryrun)', required=False, action='store_true')
     parser.add_argument('-f', dest='force', help='force rule execution or writing', required=False, action='store_true')
