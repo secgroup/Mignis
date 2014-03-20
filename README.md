@@ -162,9 +162,9 @@ Let's see some examples from the configuration above, to clearify how rules can 
 
 
 ### Work in progress features (still unstable)
-* Lists operations for excluding hosts/lists from a list. For example if we define a list alias "list1 (eth0, eth1)" and want a rule that is valid for _list1_ except for the host _1.1.1.1_ (which belongs to the interface _eth0_), we can write ```list1 / 1.1.1.1 > eth2```.
+* Lists operations for excluding hosts/lists from a list. For example if we define a list alias "list1 (eth0, eth1)" and want a rule that is valid for _list1_ except for the host _1.1.1.1_ (which belongs to the interface _eth0_), we can write ```list1/1.1.1.1 > eth2```.
 * Improving checks for identifying overlapping rules.
-* Rules queries to list all the connections that match a particular host, this is used to see all the packets a host can send/receive. This has to be expanded with lists and rules (exploiting the overlapping checks).
+* Rules queries to list all the connections that match a particular host, this is useful to see all the packets a host can send/receive. This has to be expanded with lists and rules (exploiting the overlapping checks).
 
 ### Future work
 * Abstract-level rules optimizations.
