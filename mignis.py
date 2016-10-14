@@ -1165,8 +1165,6 @@ class Mignis:
             # Remove comments and empty lines
             r = filter(lambda x: x and x[0] != '#', r)
             if split:
-                # Replace tabs with spaces
-                r = map(lambda x: re.sub('\t+', ' ', x).strip(), r)
                 # Split each line by separator
                 r = map(lambda x: map(string.strip, re.split(split_separator, x, split_count)), r)
             return r
@@ -1354,7 +1352,10 @@ class Mignis:
             old_config = ''
             while config != old_config:
                 old_config = config
-                config = re.sub('(?<=\n)@include (.*?)(?=\n)', self.config_include, config)
+                config = re.sub('(?<=\n)@include[ \t]+(.*?)(?=\n)', self.config_include, config)
+
+            # Replace every sequence of tabs and spaces with a single space
+            config = re.sub('[ \t]+', ' ', config)
 
             # Split by section
             config = re.split('(OPTIONS|INTERFACES|ALIASES|FIREWALL|POLICIES|CUSTOM)\n', config)[1:]
