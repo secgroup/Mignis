@@ -166,7 +166,7 @@ class Rule:
                 ip = IPv4Address(ipsub)
                 alias = Rule.ip2subnet(mignis, ip)
                 if alias is None:
-                    raise MignisException(self, 'The IP address "{0}" does not belong to any subnet.'.format(ipsub))
+                    raise MignisException(mignis, 'The IP address "{0}" does not belong to any subnet.'.format(ipsub))
                 intf = mignis.intf[alias][0]
         return (alias, intf, ip, port)
 
