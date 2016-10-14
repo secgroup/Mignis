@@ -113,7 +113,7 @@ class Rule:
                                 .format(invalid_option.groups()[1]))
         check_regexp= ('( |\A)('
                         #'-s|--source|-d|--destination|'
-                        '-p|--protocol'
+                        '-p|--protocol|'
                         '-j|-C|-S|-F|-L|-Z|-N|-X|-P|-E'
                         ')( |\Z)')
         invalid_option = re.search(check_regexp, filters)
