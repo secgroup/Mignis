@@ -353,8 +353,8 @@ class Rule:
             return False
 
         # If from/to interfaces don't match, rules don't overlap.
-        if not ((params_b['from_intf'] == None or params_a['from_intf'] == params_b['from_intf']) and
-                (params_b['to_intf'] == None or params_a['to_intf'] == params_b['to_intf'])):
+        if not ((params_b['from_intf'] is None or params_a['from_intf'] == params_b['from_intf']) and
+                (params_b['to_intf'] is None or params_a['to_intf'] == params_b['to_intf'])):
             return False
 
         # Check if from_ip and to_ip of a are subset of, respectively, from_ip and to_ip of b
@@ -1259,8 +1259,8 @@ class Mignis:
         else:
             ports = map(int, r[1].split('-'))
             if (len(ports) > 2 or
-                ports[0] < 0 or ports[0] > 65535 or
-                (len(ports) == 2 and (ports[1] < 0 or ports[1] > 65535 or ports[0] > ports[1]))):
+                    ports[0] < 0 or ports[0] > 65535 or
+                    (len(ports) == 2 and (ports[1] < 0 or ports[1] > 65535 or ports[0] > ports[1]))):
                 raise MignisConfigException('invalid port range "{0}".'.format(ports))
             r[1] = ports
         return r
