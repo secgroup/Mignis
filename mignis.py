@@ -1367,49 +1367,50 @@ class Mignis:
                         params = self.alias_regexp[alias].sub(val, ' ' + params + ' ')[1:-1]
 
                 try:
+                    r = []
                     if ruletype in ['/', '//']:
                         # Deny
-                        r = Rule(self, abstract_rule, abstract_rule_collapsed,
-                                 ruletype, r_from, r_to, protocol, params, None)
+                        r.append(Rule(self, abstract_rule, abstract_rule_collapsed,
+                                      ruletype, r_from, r_to, protocol, params, None))
                     elif ruletype == '<>':
                         # Bidirectional forward
-                        r = Rule(self, abstract_rule, abstract_rule_collapsed,
-                                 ruletype, r_from, r_to, protocol, params, None)
+                        r.append(Rule(self, abstract_rule, abstract_rule_collapsed,
+                                      ruletype, r_from, r_to, protocol, params, None))
                     elif ruletype == '>':
-                        if r_nat_left and r_nat_right:
-                            raise MignisConfigException('bad firewall rule in configuration file.')
+                        # if r_nat_left and r_nat_right:
+                        #     raise MignisConfigException('bad firewall rule in configuration file.')
                         if r_nat_left:
                             # SNAT
                             if r_nat_left == '[.]':
                                 # Masquerade
                                 ruletype = '>M'
-                                r = Rule(self, abstract_rule, abstract_rule_collapsed,
-                                         ruletype, r_from, r_to, protocol, params, None)
+                                r.append(Rule(self, abstract_rule, abstract_rule_collapsed,
+                                              ruletype, r_from, r_to, protocol, params, None))
                             else:
                                 # Classic SNAT
                                 ruletype = '>S'
                                 nat = self.config_split_ipport(r_nat_left[1:-1])
-                                r = Rule(self, abstract_rule, abstract_rule_collapsed,
-                                         ruletype, r_from, r_to, protocol, params, nat)
-                        elif r_nat_right:
+                                r.append(Rule(self, abstract_rule, abstract_rule_collapsed,
+                                              ruletype, r_from, r_to, protocol, params, nat))
+                        if r_nat_right:
                             # DNAT
                             ruletype = '>D'
                             nat = self.config_split_ipport(r_nat_right[1:-1])
-                            r = Rule(self, abstract_rule, abstract_rule_collapsed,
-                                     ruletype, r_from, r_to, protocol, params, nat)
+                            r.append(Rule(self, abstract_rule, abstract_rule_collapsed,
+                                          ruletype, r_from, r_to, protocol, params, nat))
                         else:
                             # Forward
-                            r = Rule(self, abstract_rule, abstract_rule_collapsed,
-                                     ruletype, r_from, r_to, protocol, params, None)
+                            r.append(Rule(self, abstract_rule, abstract_rule_collapsed,
+                                          ruletype, r_from, r_to, protocol, params, None))
                     else:
                         raise MignisConfigException('bad firewall rule in configuration file.')
                 except RuleException as e:
                     raise MignisConfigException(str(e))
 
                 if inside_sequence:
-                    rulesdict['{'].append(r)
+                    rulesdict['{'] += r
                 else:
-                    rulesdict[ruletype].append(r)
+                    rulesdict[ruletype] += r
 
         if self.debug >= 2:
             pprint.pprint(rulesdict, width=200)
