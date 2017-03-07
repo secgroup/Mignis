@@ -1,7 +1,7 @@
-#!/usr/bin/python
+# -*- coding: utf-8 -*-
 
-from ipaddr import *
-from ipaddr import _BaseV4, _BaseIP, _BaseNet, _IPAddrBase
+from ipaddr import AddressValueError, IPAddress, IPNetwork, IPv4Address
+from ipaddr import _BaseNet, _BaseV4, _IPAddrBase
 
 
 class _BaseRange(_IPAddrBase):
