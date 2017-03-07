@@ -373,6 +373,17 @@ class Rule:
         if not (protocol_a == protocol_b or protocol_a == 'all' or protocol_b == 'all'):
             return False
 
+        # This is used to avoid printing a warning when we are doing both SNAT/MASQERADE and DNAT
+        # TODO: this is probably not the best way to perform this check
+        if protocol_a == protocol_b and params_a['to_port'] == params_b['to_port'] and \
+            params_a['from_intf'] == params_b['from_intf'] and \
+            params_a['from_ip'] == params_b['from_ip'] and \
+            params_a['to_ip'] == params_b['to_ip'] and \
+            params_a['to_intf'] == params_b['to_intf'] and \
+            ((params_a['rtype'] in ('>M', '>S') and params_b['rtype'] == '>D') or
+             (params_b['rtype'] in ('>M', '>S') and params_a['rtype'] == '>D')):
+            return False
+
         # Check if nat overlaps
         # TODO: do this
 
