@@ -1533,11 +1533,13 @@ def parse_args():
                               required=False, action='store_true')
     action_group.add_argument('-c', '--config', dest='config_file', metavar='filename',
                               help='read mignis rules from file', required=False)
-    config_group = parser.add_argument_group('options for --config/-c').add_mutually_exclusive_group(required=False)
+    config_group = parser.add_argument_group('options for --config/-c')
+    config_group = config_group.add_mutually_exclusive_group(required=False)
     config_group.add_argument('-w', '--write', dest='write_rules_filename', metavar='filename',
                               help='write the rules to file', required=False)
     config_group.add_argument('-e', '--execute', dest='execute_rules', 
-        help='execute the rules without writing to file', required=False, action='store_true')
+                              help='execute the rules without writing to file', required=False, 
+                              action='store_true')
     config_group.add_argument('-q', '--query', dest='query_rules', metavar='query',
                               help='perform a query over the configuration (unstable)', required=False)
     parser.add_argument('-d', '--debug', dest='debug', help='set debugging output level (0-2)',
@@ -1550,6 +1552,10 @@ def parse_args():
     args = vars(parser.parse_args())
     if args['config_file'] and args['flush']:
         parser.error('argument -F/--flush: not allowed with argument -c/--config')
+    elif not args['config_file'] and not args['flush']:
+        parser.error('error: one of the arguments -F/--flush -c/--config is required')
+    if args['config_file'] and not any((args['write_rules_filename'], args['execute_rules'], args['query_rules'])):
+        parser.error('error: one of the arguments -w/--write -e/--execute -q/--query is required')
     return args
 
 
@@ -1557,8 +1563,8 @@ def main():
     args = parse_args()
 
     try:
-        mignis = Mignis(args['config_file'], args['debug'], args['force'], args[
-                        'dryrun'], args['write_rules_filename'], args['execute_rules'], args['flush'])
+        mignis = Mignis(args['config_file'], args['debug'], args['force'], args['dryrun'], 
+            args['write_rules_filename'], args['execute_rules'], args['flush'])
 
         if args['query_rules']:
             mignis.query_rules(args['query_rules'])
