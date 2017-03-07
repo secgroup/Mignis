@@ -7,22 +7,20 @@ For usage instructions type:
 $ ./mignis.py -h
 '''
 
-
-import operator
-import re
-import sys
-from ipaddr import IPv4Address, IPv4Network, AddressValueError
-from ipaddr_ext import IPv4Range
-import os
-import socket
-import struct
-import pprint
 import argparse
-import traceback
-import string
-from itertools import product, groupby
-import tempfile
 import bisect
+import os
+import pprint
+import re
+import string
+import sys
+import tempfile
+import traceback
+
+from collections import Counter, OrderedDict
+from ipaddr import AddressValueError, IPv4Address, IPv4Network
+from ipaddr_ext import IPv4Range
+from itertools import product
 
 
 class RuleException(Exception):
@@ -45,7 +43,7 @@ class Rule:
         self._check_filters(filters)
 
         # Extract protocol from filters
-        #filters, protocol = self._extract_protocol(filters)
+        # filters, protocol = self._extract_protocol(filters)
 
         # Expand r_from, r_to and r_nat to aliases, interfaces, IPs and ports
         from_alias, from_intf, from_ip, from_port = self.expand_address(mignis, r_from)
@@ -83,15 +81,24 @@ class Rule:
 
     @staticmethod
     def ruletype_str(ruletype):
-        if ruletype == '/': return 'Drop'
-        elif ruletype == '//': return 'Reject'
-        elif ruletype == '<>': return 'Forward (bidirectional)'
-        elif ruletype == '>': return 'Forward'
-        elif ruletype == '>D': return 'Destination Nat'
-        elif ruletype == '>M': return 'Masquerade'
-        elif ruletype == '>S': return 'Source Nat'
-        elif ruletype == '{': return 'Sequence'
-        else: raise RuleException('Invalid ruletype.')
+        if ruletype == '/':
+            return 'Drop'
+        elif ruletype == '//':
+            return 'Reject'
+        elif ruletype == '<>':
+            return 'Forward (bidirectional)'
+        elif ruletype == '>':
+            return 'Forward'
+        elif ruletype == '>D':
+            return 'Destination Nat'
+        elif ruletype == '>M':
+            return 'Masquerade'
+        elif ruletype == '>S':
+            return 'Source Nat'
+        elif ruletype == '{':
+            return 'Sequence'
+        else:
+            raise RuleException('Invalid ruletype.')
 
     def _check_filters(self, filters):
         '''Verify that some options are not used inside filters.
@@ -111,7 +118,7 @@ class Rule:
             raise RuleException('Invalid filter specified: {0}.\n'
                                 'You have to use the Mignis\'s syntax to specify ports.'
                                 .format(invalid_option.groups()[1]))
-        check_regexp= ('( |\A)('
+        check_regexp = ('( |\A)('
                         #'-s|--source|-d|--destination|'
                         '-p|--protocol'
                         '-j|-C|-S|-F|-L|-Z|-N|-X|-P|-E'
@@ -122,7 +129,7 @@ class Rule:
                                 'You can\'t use this switch as a filter.'
                                 .format(invalid_option.groups()[1]))
 
-    #def _extract_protocol(self, filters):
+    # def _extract_protocol(self, filters):
     #    '''Extract the protocol part from filters, and return the new filters
     #    string and protocol, if present.
     #    '''
@@ -134,7 +141,7 @@ class Rule:
     #    else:
     #        protocol = None
     #    return filters, protocol
-    
+
     @staticmethod
     def expand_address(mignis, addr):
         '''Given an address in the form ([*|interface|ip|subnet], port)
@@ -158,9 +165,9 @@ class Rule:
             elif '-' in ipsub:
                 # It's a range of ip addresses
                 alias = intf = None
-                #ip = map(IPv4Address, ipsub.split('-'))
+                # ip = map(IPv4Address, ipsub.split('-'))
                 ip = IPv4Range(ipsub)
-                #if len(ip) != 2:
+                # if len(ip) != 2:
                 #    raise Mignis.intfException(self, 'The range "{0}" is invalid.'.format(ipsub))
             else:
                 ip = IPv4Address(ipsub)
@@ -264,7 +271,7 @@ class Rule:
             '''
 
             # FIXME: improve nat overlap check!
-            #for rule in rulesdict['>']:
+            # for rule in rulesdict['>']:
             #    if (rule.params['from_intf'] == params['from_intf'] and
             #            rule.params['to_intf'] == params['nat_intf']):
             #       self.mignis.warning('Forward and NAT rules collision:\n- {0}\n- {1}\n'
@@ -283,9 +290,9 @@ class Rule:
         a_class = type(a)
         b_class = type(b)
 
-        if b == None:
+        if b is None:
             return True
-        if a == None:
+        if a is None:
             # b is not None, while a is
             return False
         if b_class == IPv4Network:
@@ -311,9 +318,9 @@ class Rule:
         '''Returns True if the port range a is inside b.
         a and b can be either None, or a list of length 2 maximum.
         '''
-        if b == None:
+        if b is None:
             return True
-        if a == None:
+        if a is None:
             # b is not None, while a is
             return False
         if len(b) == 1:
@@ -383,12 +390,11 @@ class Rule:
                 (
                     interface == self.params[xintf] or
                     None in [interface, self.params[xintf]]
-                )
-                and
-                (   Rule.ip_isinside(ip, self.params[xip]) or
+                ) and
+                (Rule.ip_isinside(ip, self.params[xip]) or
                     Rule.ip_isinside(self.params[xip], ip) or
                     None in [ip, self.params[xip]]
-                )
+                 )
             )
 
         # TODO: should "local" be involved by a rule with masquerade?
@@ -431,7 +437,7 @@ class Rule:
     def has_nat(self):
         return self.is_dnat() or self.is_snat() or self.is_masquerade()
 
-    ## Rule-translation functions
+    # Rule-translation functions
 
     @staticmethod
     def _format_protocol(params):
@@ -543,7 +549,8 @@ class Rule:
             params['source'] = self._format_intfip('s', 'from', params)
             params['destination'] = self._format_intfip('d', 'to', params)
             chain = 'FORWARD'
-        rules.append(self.format_rule('-A ' + chain + ' {proto} {source} {destination} {filters} -j ' + target, params))
+        rules.append(
+            self.format_rule('-A ' + chain + ' {proto} {source} {destination} {filters} -j ' + target, params))
 
         return rules
 
@@ -562,7 +569,8 @@ class Rule:
             target = 'SNAT --to-source {nat}'
         params['source'] = self._format_intfip('s', 'from', params, iponly=True)
         params['destination'] = self._format_intfip('d', 'to', params)
-        rules.append(self.format_rule('-t nat -A POSTROUTING {proto} {source} {destination} {filters} -j ' + target, params))
+        rules.append(
+            self.format_rule('-t nat -A POSTROUTING {proto} {source} {destination} {filters} -j ' + target, params))
         return rules
 
     def _dnat(self, params):
@@ -571,11 +579,12 @@ class Rule:
         rules = []
         if re.search('(^| )-m state ', params['filters']):
             self.mignis.warning('Inspectioning the state in DNAT might corrupt the rule.' +
-                'Use it only if you know what you\'re doing.\n- {0}'.format(params['abstract']))
+                                'Use it only if you know what you\'re doing.\n- {0}'.format(params['abstract']))
 
         params['source'] = self._format_intfip('s', 'from', params)
         params['destination'] = self._format_intfip('d', 'to', params, iponly=True)
-        rules.append(self.format_rule('-t mangle -A PREROUTING {proto} {source} {destination} {filters} -m state --state NEW -j DROP', params))
+        rules.append(self.format_rule(
+            '-t mangle -A PREROUTING {proto} {source} {destination} {filters} -m state --state NEW -j DROP', params))
 
         # Forward rules without filters
         filters = params['filters']
@@ -595,15 +604,17 @@ class Rule:
         params['nat'] = str(params['to_ip'])
         if params['to_port']:
             params['nat'] += ':' + '-'.join(map(str, params['to_port']))
-        rules.append(self.format_rule('-t nat -A {chain} {proto} {source} {destination} {filters} -j DNAT --to-destination {nat}', params))
+        rules.append(self.format_rule(
+            '-t nat -A {chain} {proto} {source} {destination} {filters} -j DNAT --to-destination {nat}', params))
         return rules
     ##
 
 
 class MignisException(Exception):
+
     def __init__(self, mignis, message):
         Exception.__init__(self, message)
-        #mignis.reset_iptables(False)
+        # mignis.reset_iptables(False)
 
 
 class MignisConfigException(Exception):
@@ -673,10 +684,12 @@ class Mignis:
             # Execute the rules
             self.execute('iptables-restore' + options + temp_file)
         except MignisException as e:
-            raise MignisException(self, str(e) + '\nThe temporary file which generated the error is stored in "{0}"'.format(temp_file))
+            raise MignisException(
+                self, str(e) + '\nThe temporary file which generated the error is stored in "{0}"'.format(temp_file))
 
     def write_rules(self, filename, fd=None):
-        if self.dryrun: return
+        if self.dryrun:
+            return
 
         if fd:
             f = os.fdopen(fd, 'w')
@@ -699,7 +712,7 @@ class Mignis:
                     rule = re.sub(table_opt, '', rule)
                     tables[table].append(rule)
         tables['filter'] = rules
-        
+
         # Write the rules by table
         for table_name, rules in tables.iteritems():
             f.write('*' + table_name + '\n')
@@ -736,18 +749,18 @@ class Mignis:
             print("")
         print("# WARNING: " + s)
 
-    #def reset_iptables(self):
+    # def reset_iptables(self):
     #    '''Netfilter reset with default ACCEPT for every chain
     #    '''
-    #    
+    #
     #    if not self.execute_rules:
     #        return
-    #        
+    #
     #    print('\n[*] Resetting netfilter')
     #    if self.dryrun:
     #        print('Skipped (dryrun mode)')
     #        return
-    #        
+    #
     #    reset_cmd = '''cat << EOF | iptables-restore
     #        *filter
     #        :INPUT ACCEPT
@@ -768,8 +781,8 @@ class Mignis:
     #        COMMIT
     #        EOF'''
     #    x = re.compile("^\s+", re.MULTILINE)
-    #    
-    #    try:                    
+    #
+    #    try:
     #        self.execute(x.sub('', reset_cmd))
     #    except MignisException as e:
     #        print('\n[!] ' + str(e))
@@ -797,7 +810,7 @@ class Mignis:
         self.custom_rules()
         if self.options['logging'] == 'yes':
             self.log_rules()
-    
+
     def mandatory_rules(self):
         '''Rules needed for the model to work.
         At this moment we only require an ESTABLISHED,RELATED
@@ -827,7 +840,8 @@ class Mignis:
                 self.add_iptables_rule('-A OUTPUT -o {0} -j ACCEPT -m comment --comment "ignore {0}"'.format(i_intf))
                 self.add_iptables_rule('-A FORWARD -i {0} -j ACCEPT -m comment --comment "ignore {0}"'.format(i_intf))
                 self.add_iptables_rule('-A FORWARD -o {0} -j ACCEPT -m comment --comment "ignore {0}"'.format(i_intf))
-                self.add_iptables_rule('-t mangle -A PREROUTING -i {0} -j ACCEPT -m comment --comment "ignore {0}"'.format(i_intf))
+                self.add_iptables_rule(
+                    '-t mangle -A PREROUTING -i {0} -j ACCEPT -m comment --comment "ignore {0}"'.format(i_intf))
 
     def default_rules(self):
         '''Default rules.
@@ -841,20 +855,21 @@ class Mignis:
         # Drop invalid packets
         self.wr('# - Invalid packets')
         rule = 'drop invalid'
-        self.add_iptables_rule('-t mangle -A PREROUTING -m state --state INVALID,UNTRACKED -j DROP', {'abstract': rule})
+        self.add_iptables_rule(
+            '-t mangle -A PREROUTING -m state --state INVALID,UNTRACKED -j DROP', {'abstract': rule})
         # Allow broadcast traffic
         self.wr('# - Broadcast traffic')
-        rule ='allow broadcast traffic'
+        rule = 'allow broadcast traffic'
         self.add_iptables_rule('-A INPUT -d 255.255.255.255 -j ACCEPT', {'abstract': rule})
         self.add_iptables_rule('-t mangle -A PREROUTING -d 255.255.255.255 -j ACCEPT', {'abstract': rule})
         # Allow multicast traffic
         self.wr('# - Multicast traffic')
-        rule ='allow multicast traffic'
+        rule = 'allow multicast traffic'
         self.add_iptables_rule('-A INPUT -d 224.0.0.0/4 -j ACCEPT', {'abstract': rule})
         self.add_iptables_rule('-t mangle -A PREROUTING -d 224.0.0.0/4 -j ACCEPT', {'abstract': rule})
         # We don't allow packets to go out from the same interface they came in
-        #self.wr('# - Same-interface packets')
-        #for ipsub in self.intf.iterkeys():
+        # self.wr('# - Same-interface packets')
+        # for ipsub in self.intf.iterkeys():
         #    self.add_iptables_rule('-A FORWARD -i {intf} -o {intf} -j DROP',
         #                            {'intf': self.intf[ipsub][0], 'abstract': 'drop same-interface packets'})
 
@@ -879,19 +894,22 @@ class Mignis:
                 rules = rule.get_iptables_rules(self.fw_rulesdict)
                 for r in rules:
                     self.add_iptables_rule(r)
-        
+
         # Check if rules overlap
         for (ruletype_a, rules_a) in self.fw_rulesdict.iteritems():
-            if ruletype_a == '!': continue
+            if ruletype_a == '!':
+                continue
             for rule_a in rules_a:
                 for (ruletype_b, rules_b) in self.fw_rulesdict.iteritems():
-                    if ruletype_b == '!': continue
+                    if ruletype_b == '!':
+                        continue
                     for rule_b in rules_b:
-                        if rule_b is rule_a: continue
+                        if rule_b is rule_a:
+                            continue
                         # Check if rule_a and rule_b overlap
                         if rule_b.overlaps(rule_a):
                             self.warning("Two overlapping rules have been defined:\n- {0}\n- {1}\n"
-                                .format(rule_a.params['abstract'], rule_b.params['abstract']))
+                                         .format(rule_a.params['abstract'], rule_b.params['abstract']))
 
         self.wr('\n##\n')
 
@@ -923,13 +941,13 @@ class Mignis:
         formatted as iptables rules.
         "rules" is the dictionary containing lists of Rule objects.
         '''
-        new_rules = {'/':[], '//':[], '>':[], '<>':[], '>S':[], '>M':[], '>D':[], '{':[]}
+        new_rules = {'/': [], '//': [], '>': [], '<>': [], '>S': [], '>M': [], '>D': [], '{': []}
 
         # No optimizations at the moment.
         for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S', '{']:
             for r in rules[ruletype]:
                 new_rules[ruletype].append(r)
-        
+
         '''
             # Remove duplicated rules and merge their abstract
                 for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S', '{']:
@@ -948,7 +966,7 @@ class Mignis:
                 return new_rules
         '''
         return new_rules
-    
+
     def post_optimize_rules(self, rules):
         '''Do all the requested optimizations over the iptables rules, after
         they get formatted.
@@ -965,7 +983,8 @@ class Mignis:
             subnet, ip, options = self.intf[ipsub]
             # If the "ignore" option is set, we don't need an ip/if bind
             # since the packets are already accepted by the rules set in ignore_rules()
-            if 'ignore' in options: continue
+            if 'ignore' in options:
+                continue
 
             # We can't force 127.0.0.0/8 on local, since packets with other
             # destinations may arrive.
@@ -979,18 +998,20 @@ class Mignis:
                     # We exclude all the source IPs defined for the other interfaces
                     for other_ipsub in self.intf.iterkeys():
                         # Skip if itself
-                        if other_ipsub == ipsub: continue
+                        if other_ipsub == ipsub:
+                            continue
                         other_subnet, other_ip, other_options = self.intf[other_ipsub]
                         # Skip if the interface has no ip
-                        if other_ip == None: continue
+                        if other_ip is None:
+                            continue
                         params['ip'] = other_ip
                         self.add_iptables_rule('-t mangle -A PREROUTING -i {subnet} -s {ip} -j DROP', params)
                 # Accept rule for all other IPs
                 self.add_iptables_rule('-t mangle -A PREROUTING -i {subnet} -j ACCEPT', params)
             else:
-                params = { 'subnet': subnet, 
-                           'ip': ip, 
-                           'abstract': 'bind ip {0} to intf {1}'.format(ip, subnet) }
+                params = {'subnet': subnet,
+                          'ip': ip,
+                          'abstract': 'bind ip {0} to intf {1}'.format(ip, subnet)}
                 self.add_iptables_rule('-t mangle -A PREROUTING -i {subnet} -s {ip} -j ACCEPT', params)
 
     def custom_rules(self):
@@ -1004,11 +1025,13 @@ class Mignis:
         regexp_alias = {}
         for alias in self.aliases.iterkeys():
             for switch in ['-d ', '-s ', '--destination ', '--source ']:
-                regexp_alias.setdefault(alias, []).append(re.compile('(?<={0}){1}(?={2})'.format(switch, alias, '[^a-zA-Z0-9\-_]')))
+                regexp_alias.setdefault(alias, []).append(
+                    re.compile('(?<={0}){1}(?={2})'.format(switch, alias, '[^a-zA-Z0-9\-_]')))
         regexp_intf = {}
         for alias in self.intf:
             for switch in ['-i ', '-o ', '--in-interface ', '--out-interface ']:
-                regexp_intf.setdefault(alias, []).append(re.compile('(?<={0}){1}(?={2})'.format(switch, alias, '[^a-zA-Z0-9\-_]')))
+                regexp_intf.setdefault(alias, []).append(
+                    re.compile('(?<={0}){1}(?={2})'.format(switch, alias, '[^a-zA-Z0-9\-_]')))
 
         # For each rule, search and replace aliases recursively
         for rule in self.custom:
@@ -1051,7 +1074,8 @@ class Mignis:
         self.add_iptables_rule('-t mangle -N mangle_drop')
         for proto in ['icmp', 'udp', 'tcp']:
             self.add_iptables_rule('-t mangle -N mangle_drop_{0}'.format(proto))
-            self.add_iptables_rule('-t mangle -A mangle_drop_{0} -j LOG --log-prefix "MANGLE-DROP-{1} "'.format(proto, proto.upper()))
+            self.add_iptables_rule(
+                '-t mangle -A mangle_drop_{0} -j LOG --log-prefix "MANGLE-DROP-{1} "'.format(proto, proto.upper()))
             self.add_iptables_rule('-t mangle -A mangle_drop_{0} -j DROP'.format(proto))
             self.add_iptables_rule('-t mangle -A mangle_drop -p {0} -j mangle_drop_{0}'.format(proto))
         self.add_iptables_rule('-t mangle -A mangle_drop -j LOG --log-prefix "MANGLE-DROP-UNK "')
@@ -1081,7 +1105,7 @@ class Mignis:
 
         found_rules = {}
         for sides in ['from', 'to', 'dnat', 'snat']:
-            found_rules[sides] = {'/':[], '//':[], '>':[], '<>':[], '>S':[], '>M':[], '>D':[], '{':[]}
+            found_rules[sides] = {'/': [], '//': [], '>': [], '<>': [], '>S': [], '>M': [], '>D': [], '{': []}
 
         query_len = len(query_exp)
         if query_len > 1:
@@ -1092,12 +1116,12 @@ class Mignis:
             # Extract alias, interface and ip
             try:
                 query_alias, query_interface, query_ip = Rule.expand_address(self, (q_exp, None))[:3]
-            except AddressValueError as e:
+            except AddressValueError:
                 raise MignisException(self, 'Bad query "{0}"'.format(query))
-            
+
             if query_len == 1:
                 print('\n[*] Query:\n  alias: {0}\n  intf:  {1}\n  ip:    {2}'
-                    .format(query_alias, query_interface, query_ip))
+                      .format(query_alias, query_interface, query_ip))
                 print('\n[*] Results')
 
             # For each rule, check if it involves query and print the collapsed version of the rule
@@ -1106,11 +1130,13 @@ class Mignis:
             for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S', '{']:
                 for rule in self.fw_rulesdict[ruletype]:
                     abstract_collapsed = rule.params['abstract_collapsed']
-                    abstract = rule.params['abstract']
+                    # abstract = rule.params['abstract']
                     involve_check, involves = rule.involves(query_alias, query_interface, query_ip)
                     for side, inv in involves.items():
-                        if not inv: continue
-                        if abstract_collapsed in found_rules[side][ruletype]: continue
+                        if not inv:
+                            continue
+                        if abstract_collapsed in found_rules[side][ruletype]:
+                            continue
 
                         if ruletype == '{':
                             # Insert in sequence order
@@ -1121,22 +1147,27 @@ class Mignis:
 
         for side, rules in found_rules.items():
             has_rules_side = any(map(len, rules.values()))
-            if has_rules_side: print('\n#### {0}'.format(side).upper())
+            if has_rules_side:
+                print('\n#### {0}'.format(side).upper())
             for ruletype in ['/', '//', '<>', '>', '>D', '>M', '>S', '{']:
                 has_rules = len(rules[ruletype])
-                if has_rules: print('\n## {0}:'.format(Rule.ruletype_str(ruletype)))
-                for rule in rules[ruletype]: print(rule)
-                if has_rules: print('##')
-            if has_rules_side: print('\n####')
+                if has_rules:
+                    print('\n## {0}:'.format(Rule.ruletype_str(ruletype)))
+                for rule in rules[ruletype]:
+                    print(rule)
+                if has_rules:
+                    print('##')
+            if has_rules_side:
+                print('\n####')
 
         # TODO: do queries with rules too, so you can check if mypc > * overlaps with any rule
         # and see all the rules that are involeved in mypc going out in any interface
 
-        #Rule.ip_isinside(query, rule)
-        #q_rulesdict = self.read_mignis_rules([[query]])
+        # Rule.ip_isinside(query, rule)
+        # q_rulesdict = self.read_mignis_rules([[query]])
 
-        ## Check if rules overlap
-        #for (ruletype_a, rules_a) in q_rulesdict.iteritems():
+        # Check if rules overlap
+        # for (ruletype_a, rules_a) in q_rulesdict.iteritems():
         #    if ruletype_a == '/': continue
         #    for rule_a in rules_a:
         #        for (ruletype_b, rules_b) in self.fw_rulesdict.iteritems():
@@ -1177,15 +1208,16 @@ class Mignis:
         '''Split an address in the form [ip|interface_alias]:port1[-port2]
         and returns a list in the form [ip or interface_alias, [port1, port2]]
         '''
-        if not s: return s
-        
+        if not s:
+            return s
+
         # Split ip and ports
         r = s.split(':')
         if len(r) > 2:
             raise MignisConfigException('invalid host:port parameter "{0}".'.format(s))
 
         # Convert aliases
-        #if r[0] in self.aliases:
+        # if r[0] in self.aliases:
         #    r[0] = self.aliases[r[0]]
 
         # Ports
@@ -1193,9 +1225,9 @@ class Mignis:
             r.append(None)
         else:
             ports = map(int, r[1].split('-'))
-            if (len(ports) > 2
-            or ports[0] < 0 or ports[0] > 65535
-            or (len(ports) == 2 and (ports[1] < 0 or ports[1] > 65535 or ports[0] > ports[1]))):
+            if (len(ports) > 2 or
+                ports[0] < 0 or ports[0] > 65535 or
+                (len(ports) == 2 and (ports[1] < 0 or ports[1] > 65535 or ports[0] > ports[1]))):
                 raise MignisConfigException('invalid port range "{0}".'.format(ports))
             r[1] = ports
         return r
@@ -1222,17 +1254,17 @@ class Mignis:
         while i < len(rules):
             if rules[i][-1] == '':
                 rules[i] = rules[i][:-1]
-                if rules[i+1]:
-                    rules[i] += rules.pop(i+1)
+                if rules[i + 1]:
+                    rules[i] += rules.pop(i + 1)
             elif rules[i][0] == '':
-                rules[i-1] += rules.pop(i)[1:]
+                rules[i - 1] += rules.pop(i)[1:]
             else:
                 i += 1
 
         return rules
 
     def read_mignis_rules(self, abstract_rules):
-        rulesdict = {'/':[], '//':[], '>':[], '<>':[], '>S':[], '>M':[], '>D':[], '{':[]}
+        rulesdict = {'/': [], '//': [], '>': [], '<>': [], '>S': [], '>M': [], '>D': [], '{': []}
 
         # Expand lists inside each abstract_rule and add each expanded rule
         # (at the moment we don't expand params)
@@ -1248,7 +1280,7 @@ class Mignis:
                     raise MignisConfigException('Unexpected end of sequence "}" found.')
                 inside_sequence = False
                 continue
-            
+
             rule = abstract_rule[0]
             params = abstract_rule[1] if len(abstract_rule) > 1 else ''
 
@@ -1271,7 +1303,7 @@ class Mignis:
                 if self.debug >= 3:
                     print("    expanded rule: {0}".format([abstract_rule, params]))
 
-                #rule = re.search('^(.*?) *(\[.*?\])? (/|//|>|<>) (\[.*?\])? *(.*?)$', rule)
+                # rule = re.search('^(.*?) *(\[.*?\])? (/|//|>|<>) (\[.*?\])? *(.*?)$', rule)
                 rule = self.rule_regexp.search(rule)
                 if not rule:
                     raise MignisConfigException('bad firewall rule "{0}".'.format(rule))
@@ -1281,19 +1313,21 @@ class Mignis:
 
                 r_from = self.config_split_ipport(r_from)
                 r_to = self.config_split_ipport(r_to)
-                
+
                 # Find and replace aliases inside params
                 if params:
                     for alias, val in self.aliases.iteritems():
                         params = self.alias_regexp[alias].sub(val, ' ' + params + ' ')[1:-1]
-                
+
                 try:
                     if ruletype in ['/', '//']:
                         # Deny
-                        r = Rule(self, abstract_rule, abstract_rule_collapsed, ruletype, r_from, r_to, protocol, params, None)
+                        r = Rule(self, abstract_rule, abstract_rule_collapsed,
+                                 ruletype, r_from, r_to, protocol, params, None)
                     elif ruletype == '<>':
                         # Bidirectional forward
-                        r = Rule(self, abstract_rule, abstract_rule_collapsed, ruletype, r_from, r_to, protocol, params, None)
+                        r = Rule(self, abstract_rule, abstract_rule_collapsed,
+                                 ruletype, r_from, r_to, protocol, params, None)
                     elif ruletype == '>':
                         if r_nat_left and r_nat_right:
                             raise MignisConfigException('bad firewall rule in configuration file.')
@@ -1302,20 +1336,24 @@ class Mignis:
                             if r_nat_left == '[.]':
                                 # Masquerade
                                 ruletype = '>M'
-                                r = Rule(self, abstract_rule, abstract_rule_collapsed, ruletype, r_from, r_to, protocol, params, None)
+                                r = Rule(self, abstract_rule, abstract_rule_collapsed,
+                                         ruletype, r_from, r_to, protocol, params, None)
                             else:
                                 # Classic SNAT
                                 ruletype = '>S'
                                 nat = self.config_split_ipport(r_nat_left[1:-1])
-                                r = Rule(self, abstract_rule, abstract_rule_collapsed, ruletype, r_from, r_to, protocol, params, nat)
+                                r = Rule(self, abstract_rule, abstract_rule_collapsed,
+                                         ruletype, r_from, r_to, protocol, params, nat)
                         elif r_nat_right:
                             # DNAT
                             ruletype = '>D'
                             nat = self.config_split_ipport(r_nat_right[1:-1])
-                            r = Rule(self, abstract_rule, abstract_rule_collapsed, ruletype, r_from, r_to, protocol, params, nat)
+                            r = Rule(self, abstract_rule, abstract_rule_collapsed,
+                                     ruletype, r_from, r_to, protocol, params, nat)
                         else:
                             # Forward
-                            r = Rule(self, abstract_rule, abstract_rule_collapsed, ruletype, r_from, r_to, protocol, params, None)
+                            r = Rule(self, abstract_rule, abstract_rule_collapsed,
+                                     ruletype, r_from, r_to, protocol, params, None)
                     else:
                         raise MignisConfigException('bad firewall rule in configuration file.')
                 except RuleException as e:
@@ -1325,7 +1363,7 @@ class Mignis:
                     rulesdict['{'].append(r)
                 else:
                     rulesdict[ruletype].append(r)
-        
+
         if self.debug >= 2:
             pprint.pprint(rulesdict, width=200)
 
@@ -1349,7 +1387,7 @@ class Mignis:
             print("[*] Reading the configuration")
             self.config_dir = os.path.dirname(self.config_file)
             config = open(self.config_file).read()
-            
+
             # Execute the @include directives (recursively)
             old_config = ''
             while config != old_config:
@@ -1396,7 +1434,9 @@ class Mignis:
 
             # Compile the rules regexp
             allowed_chars = '[a-zA-Z0-9\./\*_\-:,\(\) ]'
-            self.rule_regexp = re.compile('^({0}+?)(?: +(\[{0}+?\]))? +(/|//|>|<>) +(?:(\[{0}+?\]) +)?({0}*?)(?: +({0}*?))?$'.format(allowed_chars))
+            self.rule_regexp = re.compile(
+                '^({0}+?)(?: +(\[{0}+?\]))? +(/|//|>|<>) +(?:(\[{0}+?\])'
+                ' +)?({0}*?)(?: +({0}*?))?$'.format(allowed_chars))
 
             # Read the firewall rules
             if self.debug >= 2:
@@ -1420,6 +1460,8 @@ class Mignis:
             raise MignisException(self, 'Error in configuration file:\n' + str(e))
 
 # Argument parsing
+
+
 def parse_args():
     '''Argument parsing
     '''
@@ -1427,21 +1469,29 @@ def parse_args():
     parser.add_argument('-h', action='help', help='show this help message and exit')
     parser.add_argument('-c', dest='config_file', metavar='filename', help='configuration file', required=True)
     group_action = parser.add_mutually_exclusive_group(required=True)
-    group_action.add_argument('-w', dest='write_rules_filename', metavar='filename', help='write the rules to file', required=False)
-    group_action.add_argument('-e', dest='execute_rules', help='execute the rules without writing to file', required=False, action='store_true')
-    group_action.add_argument('-q', dest='query_rules', metavar='query', help='perform a query over the configuration (unstable)', required=False)
-    parser.add_argument('-d', dest='debug', help='set debugging output level (0-2)', required=False, type=int, default=0, choices=range(4))
-    parser.add_argument('-n', dest='dryrun', help='do not execute/write the rules (dryrun)', required=False, action='store_true')
-    parser.add_argument('-f', dest='force', help='force rule execution or writing', required=False, action='store_true')
-    #parser.add_argument('-r', dest='reset_script', help='reset script to execute when an error occurs', required=False)
+    group_action.add_argument('-w', dest='write_rules_filename', metavar='filename',
+                              help='write the rules to file', required=False)
+    group_action.add_argument('-e', dest='execute_rules', help='execute the rules without writing to file',
+                              required=False, action='store_true')
+    group_action.add_argument('-q', dest='query_rules', metavar='query',
+                              help='perform a query over the configuration (unstable)', required=False)
+    parser.add_argument('-d', dest='debug', help='set debugging output level (0-2)',
+                        required=False, type=int, default=0, choices=range(4))
+    parser.add_argument('-n', dest='dryrun', help='do not execute/write the rules (dryrun)',
+                        required=False, action='store_true')
+    parser.add_argument('-f', dest='force', help='force rule execution or writing',
+                        required=False, action='store_true')
+    # parser.add_argument('-r', dest='reset_script', help='reset script to execute when an error occurs', required=False)
     args = vars(parser.parse_args())
     return args
+
 
 def main():
     args = parse_args()
 
     try:
-        mignis = Mignis(args['config_file'], args['debug'], args['force'], args['dryrun'], args['write_rules_filename'], args['execute_rules'])
+        mignis = Mignis(args['config_file'], args['debug'], args['force'], args[
+                        'dryrun'], args['write_rules_filename'], args['execute_rules'])
 
         if args['query_rules']:
             mignis.query_rules(args['query_rules'])
