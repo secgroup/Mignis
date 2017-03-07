@@ -530,3 +530,6 @@ class IPv4Range(_BaseV4, _BaseRange):
         self.ip_from = IPv4Address(self._ip_from)
         self._ip_to = self._ip_int_from_string(addr[1])
         self.ip_to = IPv4Address(self._ip_to)
+
+    def __hash__(self):
+        return hash(hash(self.ip_from) * hash(self.ip_to))

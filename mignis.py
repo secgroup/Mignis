@@ -120,7 +120,7 @@ class Rule:
                                 .format(invalid_option.groups()[1]))
         check_regexp = ('( |\A)('
                         #'-s|--source|-d|--destination|'
-                        '-p|--protocol'
+                        '-p|--protocol|'
                         '-j|-C|-S|-F|-L|-Z|-N|-X|-P|-E'
                         ')( |\Z)')
         invalid_option = re.search(check_regexp, filters)
@@ -173,7 +173,7 @@ class Rule:
                 ip = IPv4Address(ipsub)
                 alias = Rule.ip2subnet(mignis, ip)
                 if alias is None:
-                    raise MignisException(self, 'The IP address "{0}" does not belong to any subnet.'.format(ipsub))
+                    raise MignisException(mignis, 'The IP address "{0}" does not belong to any subnet.'.format(ipsub))
                 intf = mignis.intf[alias][0]
         return (alias, intf, ip, port)
 
@@ -1254,8 +1254,6 @@ class Mignis:
             # Remove comments and empty lines
             r = filter(lambda x: x and x[0] != '#', r)
             if split:
-                # Replace tabs with spaces
-                r = map(lambda x: re.sub('\t+', ' ', x).strip(), r)
                 # Split each line by separator
                 r = map(lambda x: map(string.strip, re.split(split_separator, x, split_count)), r)
             return r
@@ -1451,7 +1449,10 @@ class Mignis:
             old_config = ''
             while config != old_config:
                 old_config = config
-                config = re.sub('(?<=\n)@include (.*?)(?=\n)', self.config_include, config)
+                config = re.sub('(?<=\n)@include[ \t]+(.*?)(?=\n)', self.config_include, config)
+
+            # Replace every sequence of tabs and spaces with a single space
+            config = re.sub('[ \t]+', ' ', config)
 
             # Split by section
             config = re.split('(OPTIONS|INTERFACES|ALIASES|FIREWALL|POLICIES|CUSTOM)\n', config)[1:]
