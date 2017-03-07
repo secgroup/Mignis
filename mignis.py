@@ -636,14 +636,19 @@ class Mignis:
     # Rules to be executed, as strings, in the correct order
     iptables_rules = []
 
-    def __init__(self, config_file, debug, force, dryrun, write_rules_filename, execute_rules):
+    def __init__(self, config_file, debug, force, dryrun, write_rules_filename, execute_rules, flush):
         self.config_file = config_file
         self.debug = debug
         self.force = force
         self.dryrun = dryrun
         self.write_rules_filename = write_rules_filename
         self.execute_rules = execute_rules
-        self.read_config()
+        self.flush = flush
+        # The config file should not be parsed and only flush rules should be generated
+        if self.flush:
+            self.all_rules = self.flush_rules
+        else:
+            self.read_config()
 
     def wr(self, s):
         '''Print a string to stdout
@@ -698,26 +703,31 @@ class Mignis:
                 raise MignisException(self, 'The file already exists, use -f to overwrite.')
             f = open(filename, 'w')
 
-        # Split the rules in filter, nat and mangle tables
-        separators = '[^a-zA-Z0-9\-_]'
-        rules = self.iptables_rules[:]
-        tables = {'filter': [], 'nat': [], 'mangle': []}
-        for table, table_opt in [
-                ('nat', '(?:\A|{0})(-t nat)(?:\Z|{0})'.format(separators)),
-                ('mangle', '(?:\A|{0})(-t mangle)(?:\Z|{0})'.format(separators))]:
+        if self.flush:
+            # We just need to write the rules to file
             for rule in self.iptables_rules:
-                if re.search(table_opt, rule):
-                    # Extract the rule without "-t nat" or "-t mangle" switches
-                    rules.remove(rule)
-                    rule = re.sub(table_opt, '', rule)
-                    tables[table].append(rule)
-        tables['filter'] = rules
+                f.write(rule.strip() + '\n')
+        else:
+            # Split the rules in filter, nat and mangle tables
+            separators = '[^a-zA-Z0-9\-_]'
+            rules = self.iptables_rules[:]
+            tables = {'filter': [], 'nat': [], 'mangle': []}
+            for table, table_opt in [
+                    ('nat', '(?:\A|{0})(-t nat)(?:\Z|{0})'.format(separators)),
+                    ('mangle', '(?:\A|{0})(-t mangle)(?:\Z|{0})'.format(separators))]:
+                for rule in self.iptables_rules:
+                    if re.search(table_opt, rule):
+                        # Extract the rule without "-t nat" or "-t mangle" switches
+                        rules.remove(rule)
+                        rule = re.sub(table_opt, '', rule)
+                        tables[table].append(rule)
+            tables['filter'] = rules
 
-        # Write the rules by table
-        for table_name, rules in tables.iteritems():
-            f.write('*' + table_name + '\n')
-            f.write('\n'.join(rules))
-            f.write('\nCOMMIT\n')
+            # Write the rules by table
+            for table_name, rules in tables.iteritems():
+                f.write('*' + table_name + '\n')
+                f.write('\n'.join(rules))
+                f.write('\nCOMMIT\n')
 
         f.close()
 
@@ -810,6 +820,29 @@ class Mignis:
         self.custom_rules()
         if self.options['logging'] == 'yes':
             self.log_rules()
+
+    def flush_rules(self):
+        self.iptables_rules = '''*filter
+        :INPUT ACCEPT
+        :FORWARD ACCEPT
+        :OUTPUT ACCEPT
+        COMMIT
+        *nat
+        :PREROUTING ACCEPT
+        :POSTROUTING ACCEPT
+        :OUTPUT ACCEPT
+        COMMIT
+        *mangle
+        :PREROUTING ACCEPT
+        :INPUT ACCEPT
+        :FORWARD ACCEPT
+        :OUTPUT ACCEPT
+        :POSTROUTING ACCEPT
+        COMMIT
+        *raw
+        :OUTPUT ACCEPT
+        :PREROUTING ACCEPT
+        COMMIT'''.split('\n')
 
     def mandatory_rules(self):
         '''Rules needed for the model to work.
@@ -1465,24 +1498,31 @@ class Mignis:
 def parse_args():
     '''Argument parsing
     '''
-    parser = argparse.ArgumentParser(description='A semantic based tool for firewall configuration', add_help=False)
-    parser.add_argument('-h', action='help', help='show this help message and exit')
-    parser.add_argument('-c', dest='config_file', metavar='filename', help='configuration file', required=True)
-    group_action = parser.add_mutually_exclusive_group(required=True)
-    group_action.add_argument('-w', dest='write_rules_filename', metavar='filename',
-                              help='write the rules to file', required=False)
-    group_action.add_argument('-e', dest='execute_rules', help='execute the rules without writing to file',
+    parser = argparse.ArgumentParser(description='A semantic based tool for firewall configuration',
+                                     add_help=False)
+    parser.add_argument('--help', '-h', action='help', help='show this help message and exit')
+    action_group = parser.add_argument_group('possible actions:')
+    action_group.add_argument('-F', '--flush', dest='flush', help='flush iptables ruleset',
                               required=False, action='store_true')
-    group_action.add_argument('-q', dest='query_rules', metavar='query',
+    action_group.add_argument('-c', '--config', dest='config_file', metavar='filename',
+                              help='read mignis rules from file', required=False)
+    config_group = parser.add_argument_group('options for --config/-c').add_mutually_exclusive_group(required=False)
+    config_group.add_argument('-w', '--write', dest='write_rules_filename', metavar='filename',
+                              help='write the rules to file', required=False)
+    config_group.add_argument('-e', '--execute', dest='execute_rules', 
+        help='execute the rules without writing to file', required=False, action='store_true')
+    config_group.add_argument('-q', '--query', dest='query_rules', metavar='query',
                               help='perform a query over the configuration (unstable)', required=False)
-    parser.add_argument('-d', dest='debug', help='set debugging output level (0-2)',
+    parser.add_argument('-d', '--debug', dest='debug', help='set debugging output level (0-2)',
                         required=False, type=int, default=0, choices=range(4))
-    parser.add_argument('-n', dest='dryrun', help='do not execute/write the rules (dryrun)',
+    parser.add_argument('-n', '--dryrun', dest='dryrun', help='do not execute/write the rules (dryrun)',
                         required=False, action='store_true')
-    parser.add_argument('-f', dest='force', help='force rule execution or writing',
+    parser.add_argument('-f', '--force', dest='force', help='force rule execution or writing',
                         required=False, action='store_true')
     # parser.add_argument('-r', dest='reset_script', help='reset script to execute when an error occurs', required=False)
     args = vars(parser.parse_args())
+    if args['config_file'] and args['flush']:
+        parser.error('argument -F/--flush: not allowed with argument -c/--config')
     return args
 
 
@@ -1491,7 +1531,7 @@ def main():
 
     try:
         mignis = Mignis(args['config_file'], args['debug'], args['force'], args[
-                        'dryrun'], args['write_rules_filename'], args['execute_rules'])
+                        'dryrun'], args['write_rules_filename'], args['execute_rules'], args['flush'])
 
         if args['query_rules']:
             mignis.query_rules(args['query_rules'])
