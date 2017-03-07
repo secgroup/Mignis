@@ -805,6 +805,19 @@ class Mignis:
             print('iptables ' + r)
         self.iptables_rules.append(r)
 
+    def prune_duplicated_rules(self):
+        if self.debug >= 1:
+            pruned = [item for item, count in Counter(self.iptables_rules).items() if count > 1]
+            if pruned:
+                num_pruned = len(pruned)
+                print('\n# Removed {:d} duplicated iptables rule{:s}:'.format(
+                    num_pruned, 's' if num_pruned > 1 else ''))
+
+                for i, rule in enumerate(pruned):
+                    print('[{:d}] {:s}'.format(i + 1, rule))
+
+        self.iptables_rules = list(OrderedDict.fromkeys(self.iptables_rules))
+
     def all_rules(self):
         '''Builds all rules
         '''
@@ -820,6 +833,7 @@ class Mignis:
         self.custom_rules()
         if self.options['logging'] == 'yes':
             self.log_rules()
+        self.prune_duplicated_rules()
 
     def flush_rules(self):
         self.iptables_rules = '''*filter
