@@ -12,7 +12,6 @@ import bisect
 import os
 import pprint
 import re
-import string
 import sys
 import tempfile
 import traceback
@@ -735,7 +734,7 @@ class Mignis:
             tables['filter'] = rules
 
             # Write the rules by table
-            for table_name, rules in tables.iteritems():
+            for table_name, rules in tables.items():
                 f.write('*' + table_name + '\n')
                 f.write('\n'.join(rules))
                 f.write('\nCOMMIT\n')
@@ -758,7 +757,10 @@ class Mignis:
                     execute = ''
                     print('')
                     while execute not in ['y', 'n']:
-                        execute = raw_input('Apply the rules? [y|n]: ').lower()
+                        if sys.version_info > (3,):
+                            execute = input('Apply the rules? [y|n]: ').lower()
+                        else:
+                            execute = raw_input('Apply the rules? [y|n]: ').lower()
                     if execute == 'y':
                         self.test_exec_rules()
                         print('[*] Rules applied.')
@@ -821,7 +823,7 @@ class Mignis:
             pruned = [item for item, count in Counter(self.iptables_rules).items() if count > 1]
             if pruned:
                 num_pruned = len(pruned)
-                print('\n# Removed {:d} duplicated iptables rule{:s}:'.format(
+                print('\n[+] Removed {:d} duplicated iptables rule{:s}:'.format(
                     num_pruned, 's' if num_pruned > 1 else ''))
 
                 for i, rule in enumerate(pruned):
@@ -927,7 +929,7 @@ class Mignis:
         self.add_iptables_rule('-t mangle -A PREROUTING -d 224.0.0.0/4 -j ACCEPT', {'abstract': rule})
         # We don't allow packets to go out from the same interface they came in
         # self.wr('# - Same-interface packets')
-        # for ipsub in self.intf.iterkeys():
+        # for ipsub in self.intf.keys():
         #    self.add_iptables_rule('-A FORWARD -i {intf} -o {intf} -j DROP',
         #                            {'intf': self.intf[ipsub][0], 'abstract': 'drop same-interface packets'})
 
@@ -954,11 +956,11 @@ class Mignis:
                     self.add_iptables_rule(r)
 
         # Check if rules overlap
-        for (ruletype_a, rules_a) in self.fw_rulesdict.iteritems():
+        for (ruletype_a, rules_a) in self.fw_rulesdict.items():
             if ruletype_a == '!':
                 continue
             for rule_a in rules_a:
-                for (ruletype_b, rules_b) in self.fw_rulesdict.iteritems():
+                for (ruletype_b, rules_b) in self.fw_rulesdict.items():
                     if ruletype_b == '!':
                         continue
                     for rule_b in rules_b:
@@ -980,7 +982,7 @@ class Mignis:
         self.policies_rulesdict = self.pre_optimize_rules(self.policies_rulesdict)
 
         # Cycle over the dictionary and add the rules to iptables
-        for ruletype in self.policies_rulesdict.iterkeys():
+        for ruletype in self.policies_rulesdict.keys():
             for rule in self.policies_rulesdict[ruletype]:
                 # Debugging info
                 if self.debug >= 2:
@@ -1037,7 +1039,7 @@ class Mignis:
         '''
         self.wr('\n# IP/IF bind')
         allips = IPv4Network('0.0.0.0/0')
-        for ipsub in self.intf.iterkeys():
+        for ipsub in self.intf.keys():
             subnet, ip, options = self.intf[ipsub]
             # If the "ignore" option is set, we don't need an ip/if bind
             # since the packets are already accepted by the rules set in ignore_rules()
@@ -1054,7 +1056,7 @@ class Mignis:
                 params = {'subnet': subnet, 'abstract': 'bind any ip to intf {0}'.format(subnet)}
                 if ipsub != 'local':
                     # We exclude all the source IPs defined for the other interfaces
-                    for other_ipsub in self.intf.iterkeys():
+                    for other_ipsub in self.intf.keys():
                         # Skip if itself
                         if other_ipsub == ipsub:
                             continue
@@ -1081,7 +1083,7 @@ class Mignis:
 
         # Compile the regular expressions
         regexp_alias = {}
-        for alias in self.aliases.iterkeys():
+        for alias in self.aliases.keys():
             for switch in ['-d ', '-s ', '--destination ', '--source ']:
                 regexp_alias.setdefault(alias, []).append(
                     re.compile('(?<={0}){1}(?={2})'.format(switch, alias, '[^a-zA-Z0-9\-_]')))
@@ -1096,7 +1098,7 @@ class Mignis:
             replace_again = True
             while replace_again:
                 replace_again = False
-                for alias, val in self.aliases.iteritems():
+                for alias, val in self.aliases.items():
                     '''
                     the re module, when using look-behind, requires a fixed-width pattern.
                     the regex module allows variable-width patterns and thus the following
@@ -1225,10 +1227,10 @@ class Mignis:
         # q_rulesdict = self.read_mignis_rules([[query]])
 
         # Check if rules overlap
-        # for (ruletype_a, rules_a) in q_rulesdict.iteritems():
+        # for (ruletype_a, rules_a) in q_rulesdict.items():
         #    if ruletype_a == '/': continue
         #    for rule_a in rules_a:
-        #        for (ruletype_b, rules_b) in self.fw_rulesdict.iteritems():
+        #        for (ruletype_b, rules_b) in self.fw_rulesdict.items():
         #            if ruletype_b == '/': continue
         #            for rule_b in rules_b:
         #                if rule_b is rule_a: continue
@@ -1255,7 +1257,7 @@ class Mignis:
             r = filter(lambda x: x and x[0] != '#', r)
             if split:
                 # Split each line by separator
-                r = map(lambda x: map(string.strip, re.split(split_separator, x, split_count)), r)
+                r = tuple(map(lambda x: tuple(map(lambda x: x.strip(), re.split(split_separator, x, split_count))), r))
             return r
         else:
             return None
@@ -1280,7 +1282,7 @@ class Mignis:
         if len(r) == 1:
             r.append(None)
         else:
-            ports = map(int, r[1].split('-'))
+            ports = tuple(map(int, r[1].split('-')))
             if (len(ports) > 2 or
                     ports[0] < 0 or ports[0] > 65535 or
                     (len(ports) == 2 and (ports[1] < 0 or ports[1] > 65535 or ports[0] > ports[1]))):
@@ -1294,7 +1296,7 @@ class Mignis:
         replace_again = True
         while replace_again:
             replace_again = False
-            for alias, val in self.aliases.iteritems():
+            for alias, val in self.aliases.items():
                 new_rule = self.alias_regexp[alias].sub(val, ' ' + rule + ' ')[1:-1]
                 if new_rule != rule:
                     replace_again = True
@@ -1302,7 +1304,7 @@ class Mignis:
 
         # Create a list of lists, splitting on ", *" for each list found.
         # Each list is written using "(item1, item2, ...)".
-        rules = map(lambda x: re.split(', *', x), filter(None, re.split('[()]', rule)))
+        rules = tuple(map(lambda x: re.split(', *', x), filter(None, re.split('[()]', rule))))
 
         # Flatten lists of lists
         # there is a list of lists if an the first or last element of an inner list is ''
@@ -1352,7 +1354,7 @@ class Mignis:
 
                 # Replace known strings with aliases, for the abstract rule
                 abstract_rule = rule
-                for alias, val in self.aliases.iteritems():
+                for alias, val in self.aliases.items():
                     abstract_rule = self.inverse_alias_regexp[val].sub(alias, ' ' + abstract_rule + ' ')[1:-1]
                 abstract_rule = (abstract_rule + ' ' + params).strip()
 
@@ -1372,7 +1374,7 @@ class Mignis:
 
                 # Find and replace aliases inside params
                 if params:
-                    for alias, val in self.aliases.iteritems():
+                    for alias, val in self.aliases.items():
                         params = self.alias_regexp[alias].sub(val, ' ' + params + ' ')[1:-1]
 
                 try:
@@ -1468,8 +1470,8 @@ class Mignis:
 
             # Read the interfaces
             intf = self.config_get('INTERFACES', config)
-            for x in intf:
-                if len(x) < 3 or len(x) > 4:
+            for x in tuple(intf):
+                if 3 > len(x) > 4:
                     raise MignisConfigException('Bad interface declaration "{0}".'.format(' '.join(x)))
                 intf_alias, intf_name, intf_subnet = x[:3]
                 intf_options = x[3].split() if len(x) >= 4 else []
@@ -1485,11 +1487,11 @@ class Mignis:
 
             # Compile aliases regexp
             self.alias_regexp = {}
-            for alias, val in self.aliases.iteritems():
+            for alias, val in self.aliases.items():
                 self.alias_regexp[alias] = re.compile('(?<={0}){1}(?={0})'.format('[^a-zA-Z0-9\-_]', alias))
 
             self.inverse_alias_regexp = {}
-            for alias, val in self.aliases.iteritems():
+            for alias, val in self.aliases.items():
                 self.inverse_alias_regexp[val] = re.compile('(?<={0}){1}(?={0})'.format('[^a-zA-Z0-9\-_]', val))
 
             # Compile the rules regexp
