@@ -10,3 +10,10 @@ _*
 .Trashes
 ehthumbs.db
 Thumbs.db
+.idea
+*.egg-info
+/build
+/tags
+MANIFEST
+dist
+venv
