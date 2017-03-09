@@ -3,11 +3,10 @@ from setuptools import setup
 setup(
     name='mignis',
     py_modules=['mignis', 'ipaddr_ext'],
-    version='0.9.2',
+    version='0.9.3',
     license='MIT',
     description='Mignis is a semantic based tool for firewall configuration',
     url='https://github.com/segroup/Mignis',
-    download_url='https://github.com/secgroup/Mignis/archive/v0.9.2.tar.gz',
     keywords=['iptables', 'firewall', 'semantic firewall configuration', 'netfilter'],
     install_requires=['ipaddr'],
     classifiers=[
