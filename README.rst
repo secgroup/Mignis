@@ -1,10 +1,14 @@
 Mignis
 ======
 
-Mignis is a semantic based tool for firewall configuration.
+Mignis is a semantic based tool for firewall configuration. It is designed to help 
+writing **iptables rules** using an more **human-readable syntax**, 
+without restricting iptables functionalities.
 
-Mignis is designed to help writing **iptables rules** using an more
-**human-readable syntax**, without restricting iptables functionalities.
+The traslation from Mignis syntax into the corresponding iptables ruleset has been
+**formally verified** in a paper published in Computer Security Foundations Symposium (CSF), 2014:
+
+-  `Mignis: A Semantic Based Tool for Firewall Configuration <http://ieeexplore.ieee.org/abstract/document/6957122/>`_
 
 Requirements
 ~~~~~~~~~~~~
@@ -110,6 +114,10 @@ Configuration file example
     router_ext_ip   1.2.3.4
     malicious_host  5.6.7.8
     host_over_vpn   10.8.0.123
+    remote_host_1   20.20.20.1
+    remote_host_2   30.30.30.2
+    remote_host_3   40.40.40.3
+    remote_hosts    (remote_host_1, remote_host_2, remote_host_3)
 
     FIREWALL
     # no restrictions on outgoing connections
@@ -130,8 +138,11 @@ Configuration file example
     # dnat to host_over_vpn on port 9999 with masquerade
     ext [.] > [router_ext_ip:9999] host_over_vpn:9999  tcp
 
-    # allow access to port 80 on this machine
-    ext > local:80  tcp
+    # allow access to port 80 and 443 on this machine
+    ext > local:(80, 443)  tcp
+
+    # allow only a limited set of hosts to access our vpn
+    remote_hosts > local:1194  udp
 
     POLICIES
     * // *  icmp
@@ -257,12 +268,22 @@ rules.
    Note: the first mangle rule is used to block packets which are trying
    to reach *host\_over\_vpn* bypassing the NAT.
 
-6. ``ext > local:80  tcp``\  Allow access from *ext* to port 80 on the
+6. ``ext > local:(80, 443)  tcp``\  Allow access from *ext* to port 80 and 443 on the
    local machine.
 
    ::
 
        iptables -A INPUT -p tcp -i eth1 --dport 80 -j ACCEPT
+       iptables -A INPUT -p tcp -i eth1 --dport 443 -j ACCEPT
+
+7. ``remote_hosts > local:1194  udp``\  Only the list of hosts specified in *remote\_hosts* can connect to our VPN.
+
+   ::
+       
+       iptables -A INPUT -p udp -s 20.20.20.1 --dport 1194 -j ACCEPT
+       iptables -A INPUT -p udp -s 30.30.30.2 --dport 1194 -j ACCEPT
+       iptables -A INPUT -p udp -s 40.40.40.3 --dport 1194 -j ACCEPT
+
 
 Work in progress features (still unstable)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -277,8 +298,8 @@ Work in progress features (still unstable)
    This has to be expanded with lists and rules (exploiting the
    overlapping checks).
 
-Future work for version 2
-~~~~~~~~~~~
+Future work for Mignis v2
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
 -  Complete code rewrite with a modular compiler-like design.
 -  Support multiple firewall languages (iptables, nftables, Cisco, etc.)
