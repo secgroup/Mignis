@@ -1409,7 +1409,8 @@ class Mignis:
                             nat = self.config_split_ipport(r_nat_right[1:-1])
                             r.append(Rule(self, abstract_rule, abstract_rule_collapsed,
                                           ruletype, r_from, r_to, protocol, params, nat))
-                        else:
+                        # we have no DNAT *and* no SNAT
+                        elif not r_nat_left:
                             # Forward
                             r.append(Rule(self, abstract_rule, abstract_rule_collapsed,
                                           ruletype, r_from, r_to, protocol, params, None))
