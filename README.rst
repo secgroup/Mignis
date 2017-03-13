@@ -15,17 +15,16 @@ Requirements
 
 -  Python 2.7 or higher (Python 3.x supported).
 
-.. raw:: html
+Installation
+~~~~~~~~~~~~
 
-   <!--
-   * [regex][], an alternative regular expression module. It can be installed manually by executing `easy_install regex`. This also requires the package python-dev as a dependency (execute `apt-get install python-dev` on a debian distribution).
-   -->
+Latest working version is available on PyPI:
 
-.. raw:: html
+``pip install mignis``
 
-   <!--
-   [ipaddr-py][], a python IP address manipulation library. It can be installed manually by executing `easy_install ipaddr`.
-   -->
+Most up-to-date way is to directly install the master branch from GitHub:
+
+``pip install--upgrade git+https://github.com/secgroup/Mignis.git``
 
 Description
 ~~~~~~~~~~~
