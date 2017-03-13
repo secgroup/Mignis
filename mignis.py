@@ -1257,7 +1257,7 @@ class Mignis:
             r = filter(lambda x: x and x[0] != '#', r)
             if split:
                 # Split each line by separator
-                r = tuple(map(lambda x: tuple(map(lambda x: x.strip(), re.split(split_separator, x, split_count))), r))
+                r = list(map(lambda x: list(map(lambda x: x.strip(), re.split(split_separator, x, split_count))), r))
             return r
         else:
             return None
@@ -1282,7 +1282,7 @@ class Mignis:
         if len(r) == 1:
             r.append(None)
         else:
-            ports = tuple(map(int, r[1].split('-')))
+            ports = list(map(int, r[1].split('-')))
             if (len(ports) > 2 or
                     ports[0] < 0 or ports[0] > 65535 or
                     (len(ports) == 2 and (ports[1] < 0 or ports[1] > 65535 or ports[0] > ports[1]))):
@@ -1304,7 +1304,7 @@ class Mignis:
 
         # Create a list of lists, splitting on ", *" for each list found.
         # Each list is written using "(item1, item2, ...)".
-        rules = tuple(map(lambda x: re.split(', *', x), filter(None, re.split('[()]', rule))))
+        rules = list(map(lambda x: re.split(', *', x), filter(None, re.split('[()]', rule))))
 
         # Flatten lists of lists
         # there is a list of lists if an the first or last element of an inner list is ''
@@ -1471,7 +1471,7 @@ class Mignis:
 
             # Read the interfaces
             intf = self.config_get('INTERFACES', config)
-            for x in tuple(intf):
+            for x in list(intf):
                 if 3 > len(x) > 4:
                     raise MignisConfigException('Bad interface declaration "{0}".'.format(' '.join(x)))
                 intf_alias, intf_name, intf_subnet = x[:3]
