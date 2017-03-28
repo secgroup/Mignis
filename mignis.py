@@ -585,6 +585,8 @@ class Rule:
 
         if masquerade:
             target = 'MASQUERADE'
+            if params['from_alias'] == 'local':
+                raise MignisException(self, 'Masquerade unsupported when the source is local')
         else:
             params['nat'] = str(params['nat_ip'])
             if params['nat_port']:
@@ -606,6 +608,12 @@ class Rule:
 
         params['source'] = self._format_intfip('s', 'from', params)
         params['destination'] = self._format_intfip('d', 'to', params, iponly=True)
+        if params['from_alias'] != 'local':
+            rules.extend(self.format_rule(
+                '-t mangle -A PREROUTING {proto} {source} {destination} {filters} -m state --state NEW -j DROP', params))
+        # Block direct connections to the final port of dnat
+        if params['to_alias'] == 'local':
+            params['destination'] = self._format_intfip('d', 'nat', params, iponly=True, port_override=params['to_port'])
             rules.extend(self.format_rule(
                 '-t mangle -A PREROUTING {proto} {source} {destination} {filters} -m state --state NEW -j DROP', params))
 
@@ -623,7 +631,10 @@ class Rule:
             params['chain'] = 'PREROUTING'
 
         params['destination'] = self._format_intfip('d', 'nat', params, iponly=True)
-        # TODO: verify that to_ip is not None.
+        if params['to_ip'] is None:
+            raise MignisException(self, 'Destination "{:s}" in rule "{:s}" is '
+                                        'invalid or not an alias.'.format(params['to_alias'],
+                                            params['abstract_collapsed']))
         params['nat'] = str(params['to_ip'])
         if params['to_port']:
             params['nat'] += ':' + '-'.join(map(str, params['to_port']))
@@ -830,11 +841,10 @@ class Mignis:
     #        sys.exit(-3)
 
     def add_iptables_rule(self, r, params=None):
-        if params:
-            r = Rule.format_rule(r, params)
+        r = Rule.format_rule(r, params) if params else [r]
         if self.debug >= 1:
             print('iptables ' + r)
-        self.iptables_rules.append(r)
+        self.iptables_rules.extend(r)
 
     def prune_duplicated_rules(self):
         if self.debug >= 1:
