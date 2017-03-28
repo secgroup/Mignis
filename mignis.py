@@ -1568,8 +1568,8 @@ def parse_args():
     config_group = config_group.add_mutually_exclusive_group(required=False)
     config_group.add_argument('-w', '--write', dest='write_rules_filename', metavar='filename',
                               help='write the rules to file', required=False)
-    config_group.add_argument('-e', '--execute', dest='execute_rules', 
-                              help='execute the rules without writing to file', required=False, 
+    config_group.add_argument('-e', '--execute', dest='execute_rules',
+                              help='execute the rules without writing to file', required=False,
                               action='store_true')
     config_group.add_argument('-q', '--query', dest='query_rules', metavar='query',
                               help='perform a query over the configuration (unstable)', required=False)
@@ -1594,8 +1594,8 @@ def main():
     args = parse_args()
 
     try:
-        mignis = Mignis(args['config_file'], args['debug'], args['force'], args['dryrun'], 
-            args['write_rules_filename'], args['execute_rules'], args['flush'])
+        mignis = Mignis(args['config_file'], args['debug'], args['force'], args['dryrun'],
+                        args['write_rules_filename'], args['execute_rules'], args['flush'])
 
         if args['query_rules']:
             mignis.query_rules(args['query_rules'])
