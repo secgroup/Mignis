@@ -24,7 +24,7 @@ Latest working version is available on PyPI:
 
 Most up-to-date way is to directly install the master branch from GitHub:
 
-``pip install--upgrade git+https://github.com/secgroup/Mignis.git``
+``pip install --upgrade git+https://github.com/secgroup/Mignis.git``
 
 Description
 ~~~~~~~~~~~
