@@ -9,6 +9,7 @@ The traslation from Mignis syntax into the corresponding iptables ruleset has be
 **formally verified** in a paper published in Computer Security Foundations Symposium (CSF), 2014:
 
 -  `Mignis: A Semantic Based Tool for Firewall Configuration <http://ieeexplore.ieee.org/abstract/document/6957122/>`_
+-  `Extended version <https://www.math.tecnico.ulisboa.pt/~padao/projects/ComFormCrypt/report3/papers-submitted/SUB-Mignis.pdf>`_
 
 Requirements
 ~~~~~~~~~~~~
