@@ -2,9 +2,25 @@
 # -*- coding: utf-8 -*-
 
 '''
-mignis.py is a semantic based tool for firewall configuration.
+Mignis - Semantic Based Firewall Configuration Tool
+
+Mignis translates human-readable firewall rules into iptables format.
+It provides an abstract, order-independent syntax for defining firewall
+rules that are then translated to optimized iptables rulesets.
+
+Features:
+- Semantic rule syntax (easier to read and write than raw iptables)
+- Order-independent rule processing
+- Automatic rule optimization
+- NAT support (SNAT, DNAT, Masquerade)
+- NAT reflection/hairpinning support (allows LAN clients to access services via public IP)
+- Formally verified translation (CSF 2014)
+
 For usage instructions type:
 $ ./mignis.py -h
+
+Version: 0.9.6
+Requires: Python 3.6+
 '''
 
 import argparse
@@ -33,12 +49,34 @@ class Rule:
     params = {}
 
     def __init__(self, mignis, abstract_rule, abstract_rule_collapsed, ruletype, r_from, r_to, protocol, filters, nat):
+        '''Initialize a firewall rule.
+
+        Args:
+            mignis: Reference to the Mignis object
+            abstract_rule: Rule as written in config (expanded)
+            abstract_rule_collapsed: Rule as written in config (may include lists)
+            ruletype: Type of rule (/, //, >, <>, >S, >M, >D)
+            r_from: Source address specification
+            r_to: Destination address specification
+            protocol: Protocol (tcp, udp, icmp, etc.)
+            filters: Custom iptables filters
+            nat: NAT specification (for SNAT/DNAT rules)
+        '''
         self.mignis = mignis
 
         if filters is None:
             filters = ''
 
-        # Sanitize filters
+        # Parse 'reflection' modifier for NAT hairpinning support
+        # Syntax: ext > [public_ip:port] internal_server:port tcp | reflection
+        # When enabled, generates additional rules for LAN clients to access
+        # services using the gateway's public IP
+        reflection = False
+        if 'reflection' in filters:
+            reflection = True
+            filters = re.sub(r'\breflection\b', '', filters).strip()
+
+        # Sanitize filters to prevent conflicting or dangerous options
         self._check_filters(filters)
 
         # Extract protocol from filters
@@ -73,6 +111,8 @@ class Rule:
             'nat_intf': nat_intf,
             'nat_ip': nat_ip,
             'nat_port': nat_port,
+            # NAT reflection (hairpinning)
+            'reflection': reflection,
         }
 
     def __repr__(self):
@@ -108,25 +148,23 @@ class Rule:
         -p, --protocol,
         -j, -C, -S, -F, -L, -Z, -N, -X, -P, -E
         '''
-        check_regexp = ('( |\A)('
-                        '--dport|--dports|--destination-port|--destination-ports|'
-                        '--sport|--sports|--source-port|--source-ports'
-                        ')( |\Z)')
+        check_regexp = (r'( |\A)('
+                        r'--dport|--dports|--destination-port|--destination-ports|'
+                        r'--sport|--sports|--source-port|--source-ports'
+                        r')( |\Z)')
         invalid_option = re.search(check_regexp, filters)
         if invalid_option:
-            raise RuleException('Invalid filter specified: {0}.\n'
-                                'You have to use the Mignis\'s syntax to specify ports.'
-                                .format(invalid_option.groups()[1]))
-        check_regexp = ('( |\A)('
+            raise RuleException(f'Invalid filter specified: {invalid_option.groups()[1]}.\n'
+                                'You have to use the Mignis\'s syntax to specify ports.')
+        check_regexp = (r'( |\A)('
                         #'-s|--source|-d|--destination|'
-                        '-p|--protocol|'
-                        '-j|-C|-S|-F|-L|-Z|-N|-X|-P|-E'
-                        ')( |\Z)')
+                        r'-p|--protocol|'
+                        r'-j|-C|-S|-F|-L|-Z|-N|-X|-P|-E'
+                        r')( |\Z)')
         invalid_option = re.search(check_regexp, filters)
         if invalid_option:
-            raise RuleException('Invalid filter specified: {0}.\n'
-                                'You can\'t use this switch as a filter.'
-                                .format(invalid_option.groups()[1]))
+            raise RuleException(f'Invalid filter specified: {invalid_option.groups()[1]}.\n'
+                                'You can\'t use this switch as a filter.')
 
     # def _extract_protocol(self, filters):
     #    '''Extract the protocol part from filters, and return the new filters
@@ -172,7 +210,7 @@ class Rule:
                 ip = IPv4Address(ipsub)
                 alias = Rule.ip2subnet(mignis, ip)
                 if alias is None:
-                    raise MignisException(mignis, 'The IP address "{0}" does not belong to any subnet.'.format(ipsub))
+                    raise MignisException(mignis, f'The IP address "{ipsub}" does not belong to any subnet.')
                 intf = mignis.intf[alias][0]
         return (alias, intf, ip, port)
 
@@ -194,17 +232,22 @@ class Rule:
             return all_addresses
 
     def _format_intfip(self, srcdst, direction, params, iponly=False, portonly=False):
-        '''Given 'srcdst' (which specifies if we want a source (s) or destination (d) filter type),
-        converts the given address (which may be any of: alias, interface, ip, port) to a string ready for filtering in the form
-        '-[io] intf -[ds] ip --[sd]port port'.
-        The address is get by using '<direction>_ip', where direction can be any of 'from', 'to' or 'nat'.
-        If iponly is specified, an IP address is returned instead of an interface.
-        If portonly is specified, no interface/ip filters are added.
+        '''Format interface/IP/port for iptables rules.
+
+        Args:
+            srcdst: 's' for source or 'd' for destination
+            direction: 'from', 'to', or 'nat' - which param direction to use
+            params: Rule parameters dictionary
+            iponly: If True, return IP instead of interface
+            portonly: If True, only return port specification
+
+        Returns:
+            String in format: '-[io] intf -[ds] ip --[sd]port port'
         '''
-        intf_alias = '{0}_alias'.format(direction)
-        intf = '{0}_intf'.format(direction)
-        ip = '{0}_ip'.format(direction)
-        port = '{0}_port'.format(direction)
+        intf_alias = f'{direction}_alias'
+        intf = f'{direction}_intf'
+        ip = f'{direction}_ip'
+        port = f'{direction}_port'
         io = 'i' if srcdst == 's' else 'o'
 
         r = ''
@@ -213,26 +256,26 @@ class Rule:
                 # If there is an IP, we use that instead of the interface as it's more specific
                 if isinstance(params[ip], IPv4Range):
                     srcdst_long = 'src' if srcdst == 's' else 'dst'
-                    r = '-m iprange --{0}-range {1}'.format(srcdst_long, params[ip])
+                    r = f'-m iprange --{srcdst_long}-range {params[ip]}'
                 else:
-                    r = '-{0} {1}'.format(srcdst, params[ip])
+                    r = f'-{srcdst} {params[ip]}'
             elif iponly:
                 # We need to return an IP address instead of the interface,
                 # but since no IP was explicitly specified, we have to return the subnet
                 if params[intf_alias]:
                     subnet = self.mignis.intf[params[intf_alias]][1]
-                    r = '-{0} {1}'.format(srcdst, str(subnet))
+                    r = f'-{srcdst} {subnet}'
                 else:
                     r = ''
             elif params[intf]:
                 # If there is no IP, we use the interface
-                r = '-{0} {1}'.format(io, params[intf])
+                r = f'-{io} {params[intf]}'
             else:
                 # If there is no IP or interface, we don't add any filter
                 r = ''
 
         if params[port]:
-            r += ' --{0}port {1}'.format(srcdst, ':'.join(map(str, params[port])))
+            r += f' --{srcdst}port {":".join(map(str, params[port]))}'
 
         return r
 
@@ -279,7 +322,7 @@ class Rule:
 
             return self._dnat(params)
         else:
-            raise RuleException('Key error: invalid rule type \'{0}\'.'.format(self.params['rtype']))
+            raise RuleException(f'Key error: invalid rule type \'{self.params["rtype"]}\'.')
 
     @staticmethod
     def ip_isinside(a, b):
@@ -584,12 +627,30 @@ class Rule:
         return rules
 
     def _dnat(self, params):
-        '''Translation for ">" in the case of a DNAT
+        '''Translate DNAT (Destination NAT) rules.
+
+        Generates iptables rules for destination NAT, optionally with NAT reflection.
+
+        DNAT allows external traffic to be redirected to internal servers. When the
+        'reflection' modifier is enabled, it also generates hairpinning rules so that
+        LAN clients can access services using the gateway's public IP.
+
+        Generated rules:
+        1. Mangle table DROP rule (prevents NAT bypass via internal IP)
+        2. Forward rule (allows the traffic through)
+        3. NAT PREROUTING/OUTPUT rule (performs the actual DNAT)
+        4. If reflection enabled: Additional DNAT + SNAT rules for each LAN interface
+
+        Args:
+            params: Dictionary containing rule parameters (from, to, nat, protocol, etc.)
+
+        Returns:
+            List of iptables rule strings
         '''
         rules = []
         if re.search('(^| )-m state ', params['filters']):
             self.mignis.warning('Inspectioning the state in DNAT might corrupt the rule.' +
-                                'Use it only if you know what you\'re doing.\n- {0}'.format(params['abstract']))
+                                f'Use it only if you know what you\'re doing.\n- {params["abstract"]}')
 
         params['source'] = self._format_intfip('s', 'from', params)
         params['destination'] = self._format_intfip('d', 'to', params, iponly=True)
@@ -616,6 +677,69 @@ class Rule:
             params['nat'] += ':' + '-'.join(map(str, params['to_port']))
         rules.append(self.format_rule(
             '-t nat -A {chain} {proto} {source} {destination} {filters} -j DNAT --to-destination {nat}', params))
+
+        # ========================================================================
+        # NAT REFLECTION (HAIRPINNING) SUPPORT
+        # ========================================================================
+        # When 'reflection' modifier is enabled, generate additional rules to allow
+        # LAN clients to access services using the gateway's public IP.
+        #
+        # Problem: Without reflection, when a LAN client (192.168.1.50) tries to
+        # access the public IP (1.2.3.4:80), the traffic doesn't match the normal
+        # DNAT rule (which only matches traffic from the WAN interface).
+        #
+        # Solution: For each LAN interface, generate:
+        # 1. DNAT: LAN -> public_ip:port => internal_server:port
+        # 2. SNAT (MASQUERADE): source becomes router IP
+        #    This ensures return traffic goes through the router, not directly
+        #    back to the client (which would cause connection failure)
+        #
+        # Example flow for client 192.168.1.50 accessing 1.2.3.4:80:
+        #   Client sends: 192.168.1.50:12345 -> 1.2.3.4:80
+        #   After DNAT:   192.168.1.50:12345 -> 192.168.1.100:80 (internal server)
+        #   After SNAT:   192.168.1.1:54321 -> 192.168.1.100:80 (router IP)
+        #   Server sees request from router, replies to router
+        #   Router translates back and sends to client
+        # ========================================================================
+        if params['reflection']:
+            wan_intf = params['from_intf']  # Interface where external traffic arrives
+            public_ip = params['nat_ip']     # Public IP that triggers DNAT
+            public_port = params['nat_port'] # Public port
+            internal_ip = params['to_ip']    # Internal server IP
+            internal_port = params['to_port'] # Internal server port
+
+            # Iterate over all non-WAN interfaces to generate hairpin rules
+            for intf_alias, (intf_name, intf_subnet, intf_options) in self.mignis.intf.items():
+                # Skip WAN interfaces (marked with 'wan' tag), loopback, and the WAN source interface
+                if 'wan' in intf_options or intf_alias == 'local' or intf_name == wan_intf:
+                    continue
+
+                # DNAT rule: Traffic from LAN to public IP gets redirected to internal server
+                hairpin_params = params.copy()
+                hairpin_params['source'] = f'-i {intf_name}'
+                hairpin_params['destination'] = f'-d {public_ip}'
+                if public_port:
+                    hairpin_params['destination'] += f' --dport {":".join(map(str, public_port))}'
+
+                rules.append(self.format_rule(
+                    '-t nat -A PREROUTING {proto} {source} {destination} -j DNAT --to-destination {nat}',
+                    hairpin_params))
+
+                # SNAT (MASQUERADE) rule: Rewrite source IP to router's IP
+                # This is CRITICAL for hairpinning to work. Without SNAT, the internal
+                # server would see the client's LAN IP as source and reply directly to
+                # the client, bypassing the router. The client would reject the reply
+                # because it expects a response from the public IP, not the internal IP.
+                if intf_subnet:
+                    hairpin_params['source'] = f'-s {intf_subnet}'
+                    hairpin_params['destination'] = f'-d {internal_ip}'
+                    if internal_port:
+                        hairpin_params['destination'] += f' --dport {":".join(map(str, internal_port))}'
+
+                    rules.append(self.format_rule(
+                        '-t nat -A POSTROUTING {proto} {source} {destination} -j MASQUERADE',
+                        hairpin_params))
+
         return rules
     ##
 
@@ -632,18 +756,28 @@ class MignisConfigException(Exception):
 
 
 class Mignis:
-    old_rules = []
+    '''Main Mignis firewall configuration manager.
 
+    This class handles:
+    - Reading and parsing configuration files
+    - Translating semantic rules to iptables format
+    - Managing interfaces and network aliases
+    - Generating optimized iptables rulesets
+    - Writing/applying rules to the system
+
+    Attributes:
+        intf: Dictionary mapping interface aliases to (name, subnet, options)
+              Example: {'lan': ('eth0', IPv4Network('10.0.0.0/24'), []),
+                       'ext': ('eth1', IPv4Network('0.0.0.0/0'), ['wan'])}
+              The 'wan' option marks WAN interfaces for NAT reflection
+        iptables_rules: List of generated iptables rule strings
+        old_rules: Previously applied rules (for rollback)
+        aliases: IP address aliases for cleaner rule syntax
+        fw_rulesdict: Parsed firewall rules organized by type
+        options: Configuration options (logging, default_rules, etc.)
     '''
-    intf contains the alias/interface/subnet mapping for each interface.
-    An example of how its structure looks like:
-    {
-        'lan': ('eth0', IPv4Network('10.0.0.0/24')),
-        'ext': ('eth1', IPv4Network('0.0.0.0/0'))
-    }
-    '''
+    old_rules = []
     intf = {}
-    # Rules to be executed, as strings, in the correct order
     iptables_rules = []
 
     def __init__(self, config_file, debug, force, dryrun, write_rules_filename, execute_rules, flush):
@@ -719,12 +853,12 @@ class Mignis:
                 f.write(rule.strip() + '\n')
         else:
             # Split the rules in filter, nat and mangle tables
-            separators = '[^a-zA-Z0-9\-_]'
+            separators = r'[^a-zA-Z0-9\-_]'
             rules = self.iptables_rules[:]
             tables = {'filter': [], 'nat': [], 'mangle': []}
             for table, table_opt in [
-                    ('nat', '(?:\A|{0})(-t nat)(?:\Z|{0})'.format(separators)),
-                    ('mangle', '(?:\A|{0})(-t mangle)(?:\Z|{0})'.format(separators))]:
+                    ('nat', rf'(?:\A|{separators})(-t nat)(?:\Z|{separators})'),
+                    ('mangle', rf'(?:\A|{separators})(-t mangle)(?:\Z|{separators})')]:
                 for rule in self.iptables_rules:
                     if re.search(table_opt, rule):
                         # Extract the rule without "-t nat" or "-t mangle" switches
@@ -1081,17 +1215,17 @@ class Mignis:
         '''
         self.wr('\n## Custom rules')
 
-        # Compile the regular expressions
+        # Compile the regular expressions for alias replacement
         regexp_alias = {}
         for alias in self.aliases.keys():
             for switch in ['-d ', '-s ', '--destination ', '--source ']:
                 regexp_alias.setdefault(alias, []).append(
-                    re.compile('(?<={0}){1}(?={2})'.format(switch, alias, '[^a-zA-Z0-9\-_]')))
+                    re.compile(rf'(?<={re.escape(switch)}){re.escape(alias)}(?=[^a-zA-Z0-9\-_])'))
         regexp_intf = {}
         for alias in self.intf:
             for switch in ['-i ', '-o ', '--in-interface ', '--out-interface ']:
                 regexp_intf.setdefault(alias, []).append(
-                    re.compile('(?<={0}){1}(?={2})'.format(switch, alias, '[^a-zA-Z0-9\-_]')))
+                    re.compile(rf'(?<={re.escape(switch)}){re.escape(alias)}(?=[^a-zA-Z0-9\-_])'))
 
         # For each rule, search and replace aliases recursively
         for rule in self.custom:
@@ -1099,17 +1233,10 @@ class Mignis:
             while replace_again:
                 replace_again = False
                 for alias, val in self.aliases.items():
-                    '''
-                    the re module, when using look-behind, requires a fixed-width pattern.
-                    the regex module allows variable-width patterns and thus the following
-                    for loop can be replaced by this line:
-                    switch = '(-d|-s|--destination|--source) '
-                    rule = re.sub(
-                                '(?<={0}){1}(?={2})'.format(switch, alias, '[^a-zA-Z0-9\-_]'),
-                                val,
-                                rule)
-                    when the regex module will replace re, we can change this code.
-                    '''
+                    # Note: the re module, when using look-behind, requires a fixed-width pattern.
+                    # The regex module allows variable-width patterns. This loop could be simplified
+                    # to: rule = re.sub(r'(?<=switch){alias}(?=[^a-zA-Z0-9_-])', val, rule)
+                    # when the regex module replaces re in the future.
                     for n, switch in enumerate(['-d ', '-s ', '--destination ', '--source ']):
                         new_rule = regexp_alias[alias][n].sub(val, rule)
                         if new_rule != rule:
@@ -1240,24 +1367,24 @@ class Mignis:
 
         self.wr('##')
 
-    def config_get(self, what, config, split_separator='\s+', split_count=0, split=True):
+    def config_get(self, what, config, split_separator=r'\s+', split_count=0, split=True):
         '''Read a configuration section. 'what' is the configuration section name,
         while 'config' is the whole configuration as a string.
         Returns a list where each element is a line, and every element is a list
         containing the line splitted by 'split_separator'.
         '''
         if what not in config:
-            raise MignisConfigException('Missing section "{0}" in the configuration file.'.format(what))
+            raise MignisConfigException(f'Missing section "{what}" in the configuration file.')
 
-        r = re.search('(.*?)(\n*\Z)', config[what], re.DOTALL)
+        r = re.search(r'(.*?)(\n*\Z)', config[what], re.DOTALL)
         if r and r.groups():
             # Get the section contents and split by line
             r = r.groups()[0].strip().split('\n')
             # Remove comments and empty lines
             r = filter(lambda x: x and x[0] != '#', r)
             if split:
-                # Split each line by separator
-                r = list(map(lambda x: list(map(lambda x: x.strip(), re.split(split_separator, x, split_count))), r))
+                # Split each line by separator (maxsplit as keyword argument)
+                r = list(map(lambda x: list(map(lambda x: x.strip(), re.split(split_separator, x, maxsplit=split_count))), r))
             return r
         else:
             return None
@@ -1304,7 +1431,7 @@ class Mignis:
 
         # Create a list of lists, splitting on ", *" for each list found.
         # Each list is written using "(item1, item2, ...)".
-        rules = list(map(lambda x: re.split(', *', x), filter(None, re.split('[()]', rule))))
+        rules = list(map(lambda x: re.split(r', *', x), filter(None, re.split(r'[()]', rule))))
 
         # Flatten lists of lists
         # there is a list of lists if an the first or last element of an inner list is ''
@@ -1452,13 +1579,13 @@ class Mignis:
             old_config = ''
             while config != old_config:
                 old_config = config
-                config = re.sub('(?<=\n)@include[ \t]+(.*?)(?=\n)', self.config_include, config)
+                config = re.sub(r'(?<=\n)@include[ \t]+(.*?)(?=\n)', self.config_include, config)
 
             # Replace every sequence of tabs and spaces with a single space
-            config = re.sub('[ \t]+', ' ', config)
+            config = re.sub(r'[ \t]+', ' ', config)
 
             # Split by section
-            config = re.split('(OPTIONS|INTERFACES|ALIASES|FIREWALL|POLICIES|CUSTOM)\n', config)[1:]
+            config = re.split(r'(OPTIONS|INTERFACES|ALIASES|FIREWALL|POLICIES|CUSTOM)\n', config)[1:]
             config = dict(zip(config[::2], config[1::2]))
 
             # Read the options
@@ -1486,29 +1613,31 @@ class Mignis:
             for x in aliases_list:
                 self.aliases[x[0]] = x[1]
 
-            # Compile aliases regexp
+            # Compile aliases regexp for replacement in rules
             self.alias_regexp = {}
             for alias, val in self.aliases.items():
-                self.alias_regexp[alias] = re.compile('(?<={0}){1}(?={0})'.format('[^a-zA-Z0-9\-_]', alias))
+                # Match alias when surrounded by non-alphanumeric characters
+                self.alias_regexp[alias] = re.compile(rf'(?<=[^a-zA-Z0-9\-_]){re.escape(alias)}(?=[^a-zA-Z0-9\-_])')
 
             self.inverse_alias_regexp = {}
             for alias, val in self.aliases.items():
-                self.inverse_alias_regexp[val] = re.compile('(?<={0}){1}(?={0})'.format('[^a-zA-Z0-9\-_]', val))
+                # Match value when surrounded by non-alphanumeric characters (for inverse replacement)
+                self.inverse_alias_regexp[val] = re.compile(rf'(?<=[^a-zA-Z0-9\-_]){re.escape(val)}(?=[^a-zA-Z0-9\-_])')
 
             # Compile the rules regexp
-            allowed_chars = '[a-zA-Z0-9\./\*_\-:,\(\) ]'
+            allowed_chars = r'[a-zA-Z0-9\./\*_\-:,\(\) ]'
             self.rule_regexp = re.compile(
-                '^({0}+?)(?: +(\[{0}+?\]))? +(/|//|>|<>) +(?:(\[{0}+?\])'
-                ' +)?({0}*?)(?: +({0}*?))?$'.format(allowed_chars))
+                rf'^({allowed_chars}+?)(?: +(\[{allowed_chars}+?\]))? +(/|//|>|<>) +(?:(\[{allowed_chars}+?\])'
+                rf' +)?({allowed_chars}*?)(?: +({allowed_chars}*?))?$')
 
             # Read the firewall rules
             if self.debug >= 2:
                 print("\n[+] Firewall rules")
-            abstract_rules = self.config_get('FIREWALL', config, '\|', 1)
+            abstract_rules = self.config_get('FIREWALL', config, r'\|', 1)
             self.fw_rulesdict = self.read_mignis_rules(abstract_rules)
 
             # Read the default policies
-            policies = self.config_get('POLICIES', config, '\|', 1)
+            policies = self.config_get('POLICIES', config, r'\|', 1)
             if self.debug >= 2:
                 print("\n[+] Policies")
             self.policies_rulesdict = self.read_mignis_rules(policies)
