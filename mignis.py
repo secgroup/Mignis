@@ -33,9 +33,10 @@ import tempfile
 import traceback
 
 from collections import Counter, OrderedDict
-from ipaddr import AddressValueError, IPv4Address, IPv4Network
+from ipaddress import AddressValueError, IPv4Address, IPv4Network
 from ipaddr_ext import IPv4Range
 from itertools import product
+from typing import List, Dict, Tuple, Optional, Union, Any
 
 
 class RuleException(Exception):
@@ -48,7 +49,16 @@ class Rule:
     # Dictionary with rule parameters
     params = {}
 
-    def __init__(self, mignis, abstract_rule, abstract_rule_collapsed, ruletype, r_from, r_to, protocol, filters, nat):
+    def __init__(self,
+                 mignis: 'Mignis',
+                 abstract_rule: str,
+                 abstract_rule_collapsed: str,
+                 ruletype: str,
+                 r_from: Optional[Tuple[str, Optional[List[int]]]],
+                 r_to: Optional[Tuple[str, Optional[List[int]]]],
+                 protocol: Optional[str],
+                 filters: Optional[str],
+                 nat: Optional[Tuple[str, Optional[List[int]]]]) -> None:
         '''Initialize a firewall rule.
 
         Args:
@@ -119,7 +129,8 @@ class Rule:
         return pprint.pformat(self.params)
 
     @staticmethod
-    def ruletype_str(ruletype):
+    def ruletype_str(ruletype: str) -> str:
+        '''Convert ruletype code to human-readable string.'''
         if ruletype == '/':
             return 'Drop'
         elif ruletype == '//':
@@ -139,8 +150,9 @@ class Rule:
         else:
             raise RuleException('Invalid ruletype.')
 
-    def _check_filters(self, filters):
+    def _check_filters(self, filters: str) -> None:
         '''Verify that some options are not used inside filters.
+
         At the moment we look for:
         --dport, --dports, --destination-port, --destination-ports,
         --sport, --sports, --source-port, --source-ports,
@@ -180,9 +192,14 @@ class Rule:
     #    return filters, protocol
 
     @staticmethod
-    def expand_address(mignis, addr):
+    def expand_address(mignis: 'Mignis',
+                      addr: Optional[Tuple[str, Optional[List[int]]]]) -> Tuple[Optional[str],
+                                                                                  Optional[str],
+                                                                                  Optional[Union[IPv4Address, IPv4Network, IPv4Range]],
+                                                                                  Optional[List[int]]]:
         '''Given an address in the form ([*|interface|ip|subnet], port)
         a tuple containing (alias, interface, ip, port) is returned.
+
         Note that ip can be either an IPv4Address, a list of IP addresses
         (in the case of an IP range) or an IPv4Network.
         '''
@@ -215,9 +232,8 @@ class Rule:
         return (alias, intf, ip, port)
 
     @staticmethod
-    def ip2subnet(mignis, ip):
-        '''Returns the alias of the subnet the ip is in, or None if not found
-        '''
+    def ip2subnet(mignis: 'Mignis', ip: IPv4Address) -> Optional[str]:
+        '''Returns the alias of the subnet the ip is in, or None if not found.'''
         # TODO: fix this for 0.0.0.0/0. We are doing a hack here to exclude 0.0.0.0/0 and
         # assign it only to an ip we don't know, which should be an external one in that case.
         all_addresses = None
@@ -231,7 +247,12 @@ class Rule:
         else:
             return all_addresses
 
-    def _format_intfip(self, srcdst, direction, params, iponly=False, portonly=False):
+    def _format_intfip(self,
+                      srcdst: str,
+                      direction: str,
+                      params: Dict[str, Any],
+                      iponly: bool = False,
+                      portonly: bool = False) -> str:
         '''Format interface/IP/port for iptables rules.
 
         Args:
@@ -493,8 +514,9 @@ class Rule:
     # Rule-translation functions
 
     @staticmethod
-    def _format_protocol(params):
+    def _format_protocol(params: Dict[str, Any]) -> str:
         '''Add the protocol to the rule.
+
         We need to add this before adding the --[ds]port switch as
         iptables won't recognize the -p switch if placed after --dport.
         '''
@@ -511,7 +533,7 @@ class Rule:
         return ''
 
     @staticmethod
-    def format_rule(fmt, params):
+    def format_rule(fmt: str, params: Dict[str, Any]) -> str:
         if 'abstract' in params:
             # Escape the " character
             params['rule_escaped'] = params['abstract'].replace('"', '\\"')
@@ -520,8 +542,9 @@ class Rule:
         rule = re.sub(' +', ' ', fmt.format(**params))
         return rule
 
-    def _forward(self, params, flip=False):
+    def _forward(self, params: Dict[str, Any], flip: bool = False) -> List[str]:
         '''Translation for ">".
+
         If flip is True, the 'to' and 'from' parameters are switched
         (this only happens for the non-local case).
         '''
@@ -572,9 +595,8 @@ class Rule:
             rules.append(self.format_rule('-A FORWARD {proto} {source} {destination} {filters} -j ACCEPT', params))
         return rules
 
-    def _dbl_forward(self, params):
-        '''Translation for "<>"
-        '''
+    def _dbl_forward(self, params: Dict[str, Any]) -> List[str]:
+        '''Translation for "<>" (bidirectional forward).'''
         rules = []
         rules.extend(self._forward(params))
         rules.extend(self._forward(params, flip=True))
@@ -607,9 +629,8 @@ class Rule:
 
         return rules
 
-    def _snat(self, params, masquerade=False):
-        '''Translation for ">" in the case of a SNAT
-        '''
+    def _snat(self, params: Dict[str, Any], masquerade: bool = False) -> List[str]:
+        '''Translation for ">" in the case of a SNAT.'''
         rules = []
         rules.extend(self._forward(params))
 
@@ -626,7 +647,7 @@ class Rule:
             self.format_rule('-t nat -A POSTROUTING {proto} {source} {destination} {filters} -j ' + target, params))
         return rules
 
-    def _dnat(self, params):
+    def _dnat(self, params: Dict[str, Any]) -> List[str]:
         '''Translate DNAT (Destination NAT) rules.
 
         Generates iptables rules for destination NAT, optionally with NAT reflection.

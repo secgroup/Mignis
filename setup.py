@@ -16,7 +16,7 @@ setup(
     url='https://github.com/segroup/Mignis',
     keywords=['iptables', 'firewall', 'semantic firewall configuration', 'netfilter', 'nat reflection', 'hairpinning'],
     python_requires='>=3.6',
-    install_requires=['ipaddr'],
+    install_requires=[],  # No external dependencies - uses stdlib ipaddress
     classifiers=[
         'Development Status :: 4 - Beta',
         'Environment :: Console',
