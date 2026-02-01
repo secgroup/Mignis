@@ -14,7 +14,7 @@ The traslation from Mignis syntax into the corresponding iptables ruleset has be
 Requirements
 ~~~~~~~~~~~~
 
--  Python 2.7 or higher (Python 3.x supported).
+-  Python 3.6 or higher.
 
 Installation
 ~~~~~~~~~~~~
