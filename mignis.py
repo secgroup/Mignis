@@ -735,8 +735,19 @@ class Rule:
                 if 'wan' in intf_options or intf_alias == 'local' or intf_name == wan_intf:
                     continue
 
-                # DNAT rule: Traffic from LAN to public IP gets redirected to internal server
+                # FORWARD rule: Allow hairpin traffic from this LAN interface to the internal server
+                # Without this, the default FORWARD DROP policy blocks the redirected traffic
+                # since the original FORWARD rule only allows traffic from the WAN interface.
                 hairpin_params = params.copy()
+                hairpin_params['source'] = f'-i {intf_name}'
+                hairpin_params['destination'] = f'-d {internal_ip}'
+                if internal_port:
+                    hairpin_params['destination'] += f' --dport {":".join(map(str, internal_port))}'
+                rules.append(self.format_rule(
+                    '-A FORWARD {proto} {source} {destination} -j ACCEPT',
+                    hairpin_params))
+
+                # DNAT rule: Traffic from LAN to public IP gets redirected to internal server
                 hairpin_params['source'] = f'-i {intf_name}'
                 hairpin_params['destination'] = f'-d {public_ip}'
                 if public_port:
@@ -746,28 +757,24 @@ class Rule:
                     '-t nat -A PREROUTING {proto} {source} {destination} -j DNAT --to-destination {nat}',
                     hairpin_params))
 
-                # SNAT rule: Rewrite source IP to the public IP
+                # MASQUERADE rule: Rewrite source IP to the router's IP on the outgoing interface
                 # This is CRITICAL for hairpinning to work. Without SNAT, the internal
                 # server would see the client's LAN IP as source and reply directly to
                 # the client, bypassing the router. The client would reject the reply
                 # because it expects a response from the public IP, not the internal IP.
                 #
-                # We use SNAT with the specific public IP instead of MASQUERADE to support
-                # multi-WAN setups correctly. This ensures the source IP matches the WAN
-                # interface that received the original DNAT rule, preventing routing issues
-                # when multiple gateways are present.
+                # We use MASQUERADE (not SNAT with public IP) because the hairpin traffic
+                # exits via a LAN interface, not a WAN interface. MASQUERADE automatically
+                # uses the router's IP on that LAN interface, ensuring the internal server
+                # replies back through the router for proper de-NAT.
                 if intf_subnet:
                     hairpin_params['source'] = f'-s {intf_subnet}'
                     hairpin_params['destination'] = f'-d {internal_ip}'
                     if internal_port:
                         hairpin_params['destination'] += f' --dport {":".join(map(str, internal_port))}'
 
-                    # Use the public IP that triggered the DNAT as SNAT source
-                    # This guarantees correct source IP in multi-WAN scenarios
-                    snat_source = str(public_ip)
-
                     rules.append(self.format_rule(
-                        f'-t nat -A POSTROUTING {{proto}} {{source}} {{destination}} -j SNAT --to-source {snat_source}',
+                        '-t nat -A POSTROUTING {proto} {source} {destination} -j MASQUERADE',
                         hairpin_params))
 
         return rules
