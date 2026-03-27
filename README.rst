@@ -15,6 +15,7 @@ Requirements
 ~~~~~~~~~~~~
 
 -  Python 3.6 or higher.
+-  No external dependencies (uses the standard library ``ipaddress`` module).
 
 Installation
 ~~~~~~~~~~~~
@@ -105,7 +106,7 @@ Configuration file example
 
     INTERFACES
     lan     eth0    10.0.0.0/24
-    ext     eth1    0.0.0.0/0
+    ext     eth1    0.0.0.0/0    wan
     dummy   eth2    none         ignore
     vpn     tun0    10.8.0.0/24
 
@@ -134,6 +135,9 @@ Configuration file example
 
     # dnat to mypc on port 8888
     ext > [router_ext_ip:8888] mypc:8888  udp
+
+    # dnat to mypc on port 443 with NAT reflection (hairpinning)
+    ext > [router_ext_ip:443] mypc:443  tcp | reflection
 
     # dnat to host_over_vpn on port 9999 with masquerade
     ext [.] > [router_ext_ip:9999] host_over_vpn:9999  tcp
@@ -171,9 +175,14 @@ Each configuration file needs 6 sections:
    used when writing rules). The syntax is
    ``alias interface-name subnet options``. If the interface doesn't
    have an ip address the keyword ``none`` must be used in place of the
-   subnet. At the moment the only option allowed is ``ignore``, which is
-   used to tell mignis to always allow traffic on that interface (i.e.
-   it is not taken into account in firewall rules).
+   subnet. Available options are:
+
+   -  ``ignore``: always allow traffic on that interface (i.e.
+      it is not taken into account in firewall rules).
+   -  ``wan``: marks the interface as a WAN interface. This is used by
+      NAT reflection to identify which interfaces are external and
+      which are internal (LAN). Hairpin rules are generated for all
+      non-WAN interfaces.
 -  **ALIASES**: defines aliases for IP addresses. The syntax is
    ``alias ip-address``.
 -  **FIREWALL**: contains abstract rules. The syntax is
@@ -195,6 +204,12 @@ Each configuration file needs 6 sections:
    Finally an *iptables filter* is any iptables option used for
    filtering packets. Common options may be "--icmp-type echo-reply",
    "-m module", etc.
+
+   A special ``reflection`` modifier can be added to DNAT rules to enable
+   NAT reflection (hairpinning). This allows LAN clients to access
+   services via the gateway's public IP address. When enabled, additional
+   DNAT, FORWARD and MASQUERADE rules are generated for each non-WAN
+   interface. Example: ``ext > [public_ip:443] server:443 tcp | reflection``
 
 -  **POLICIES**: the default mignis behavior for unmatched packets is to
    drop them. This section is useful if one wants to reject packets
@@ -279,10 +294,32 @@ rules.
 7. ``remote_hosts > local:1194  udp``\  Only the list of hosts specified in *remote\_hosts* can connect to our VPN.
 
    ::
-       
+
        iptables -A INPUT -p udp -s 20.20.20.1 --dport 1194 -j ACCEPT
        iptables -A INPUT -p udp -s 30.30.30.2 --dport 1194 -j ACCEPT
        iptables -A INPUT -p udp -s 40.40.40.3 --dport 1194 -j ACCEPT
+
+8. ``ext > [router_ext_ip:443] mypc:443  tcp | reflection``\  TCP packets
+   originating from *ext* to *router\_ext\_ip* on port 443, are DNAT'ed
+   to *mypc* on port 443. The ``reflection`` modifier also generates hairpin
+   rules so that LAN clients can access the service via the public IP.
+
+   ::
+
+       iptables -t mangle -A PREROUTING -p tcp -i eth1 -d 10.0.0.2 --dport 443 -m state --state NEW -j DROP
+       iptables -A FORWARD -p tcp -i eth1 -d 10.0.0.2 --dport 443 -j ACCEPT
+       iptables -t nat -A PREROUTING -p tcp -i eth1 -d 1.2.3.4 --dport 443 -j DNAT --to-destination 10.0.0.2:443
+
+   For each non-WAN interface (e.g. *lan*), the following hairpin rules are added:
+
+   ::
+
+       iptables -A FORWARD -p tcp -i eth0 -d 10.0.0.2 --dport 443 -j ACCEPT
+       iptables -t nat -A PREROUTING -p tcp -i eth0 -d 1.2.3.4 --dport 443 -j DNAT --to-destination 10.0.0.2:443
+       iptables -t nat -A POSTROUTING -p tcp -s 10.0.0.0/24 -d 10.0.0.2 --dport 443 -j MASQUERADE
+
+   Note: the MASQUERADE rule rewrites the source to the router's LAN IP,
+   ensuring replies go through the router for proper de-NAT.
 
 
 Work in progress features (still unstable)
