@@ -724,13 +724,17 @@ class Rule:
         # ========================================================================
         if params['reflection']:
             wan_intf = params['from_intf']  # Interface where external traffic arrives
-            public_ip = params['nat_ip']     # Public IP that triggers DNAT
+            # Use the pub= IP if configured on the WAN interface (double NAT scenario),
+            # otherwise fall back to the DNAT destination IP (nat_ip)
+            from_alias = params['from_alias']
+            pub_ip = self.mignis.intf[from_alias][3] if from_alias in self.mignis.intf else None
+            public_ip = pub_ip or params['nat_ip']
             public_port = params['nat_port'] # Public port
             internal_ip = params['to_ip']    # Internal server IP
             internal_port = params['to_port'] # Internal server port
 
             # Iterate over all non-WAN interfaces to generate hairpin rules
-            for intf_alias, (intf_name, intf_subnet, intf_options) in self.mignis.intf.items():
+            for intf_alias, (intf_name, intf_subnet, intf_options, _) in self.mignis.intf.items():
                 # Skip WAN interfaces (marked with 'wan' tag), loopback, and the WAN source interface
                 if 'wan' in intf_options or intf_alias == 'local' or intf_name == wan_intf:
                     continue
@@ -803,10 +807,11 @@ class Mignis:
     - Writing/applying rules to the system
 
     Attributes:
-        intf: Dictionary mapping interface aliases to (name, subnet, options)
-              Example: {'lan': ('eth0', IPv4Network('10.0.0.0/24'), []),
-                       'ext': ('eth1', IPv4Network('0.0.0.0/0'), ['wan'])}
-              The 'wan' option marks WAN interfaces for NAT reflection
+        intf: Dictionary mapping interface aliases to (name, subnet, options, pub_ip)
+              Example: {'lan': ('eth0', IPv4Network('10.0.0.0/24'), [], None),
+                       'ext': ('eth1', IPv4Network('0.0.0.0/0'), ['wan'], IPv4Address('93.92.241.21'))}
+              The 'wan' option marks WAN interfaces for NAT reflection.
+              The pub_ip is the real public IP for double NAT scenarios (from pub= option).
         iptables_rules: List of generated iptables rule strings
         old_rules: Previously applied rules (for rollback)
         aliases: IP address aliases for cleaner rule syntax
@@ -1065,7 +1070,7 @@ class Mignis:
         '''Ignore rules for each interface, if specified as an option
         '''
         self.wr('\n# Ignore rules')
-        for i_alias, (i_intf, i_subnet, i_options) in self.intf.items():
+        for i_alias, (i_intf, i_subnet, i_options, _) in self.intf.items():
             if 'ignore' in i_options:
                 self.add_iptables_rule('-A INPUT -i {0} -j ACCEPT -m comment --comment "ignore {0}"'.format(i_intf))
                 self.add_iptables_rule('-A OUTPUT -o {0} -j ACCEPT -m comment --comment "ignore {0}"'.format(i_intf))
@@ -1211,7 +1216,7 @@ class Mignis:
         self.wr('\n# IP/IF bind')
         allips = IPv4Network('0.0.0.0/0')
         for ipsub in self.intf.keys():
-            subnet, ip, options = self.intf[ipsub]
+            subnet, ip, options, _ = self.intf[ipsub]
             # If the "ignore" option is set, we don't need an ip/if bind
             # since the packets are already accepted by the rules set in ignore_rules()
             if 'ignore' in options:
@@ -1231,7 +1236,7 @@ class Mignis:
                         # Skip if itself
                         if other_ipsub == ipsub:
                             continue
-                        other_subnet, other_ip, other_options = self.intf[other_ipsub]
+                        other_subnet, other_ip, other_options, _ = self.intf[other_ipsub]
                         # Skip if the interface has no ip
                         if other_ip is None:
                             continue
@@ -1639,10 +1644,17 @@ class Mignis:
                 if 3 > len(x) > 4:
                     raise MignisConfigException('Bad interface declaration "{0}".'.format(' '.join(x)))
                 intf_alias, intf_name, intf_subnet = x[:3]
-                intf_options = x[3].split() if len(x) >= 4 else []
+                intf_options = x[3:] if len(x) >= 4 else []
                 intf_subnet = None if intf_subnet == 'none' else IPv4Network(intf_subnet, strict=True)
-                self.intf[intf_alias] = (intf_name, intf_subnet, intf_options)
-            self.intf['local'] = ('lo', IPv4Network('127.0.0.0/8', strict=True), [])
+                # Extract pub=IP option (public IP for NAT reflection behind double NAT)
+                pub_ip = None
+                for opt in intf_options:
+                    if opt.startswith('pub='):
+                        pub_ip = IPv4Address(opt[4:])
+                        intf_options.remove(opt)
+                        break
+                self.intf[intf_alias] = (intf_name, intf_subnet, intf_options, pub_ip)
+            self.intf['local'] = ('lo', IPv4Network('127.0.0.0/8', strict=True), [], None)
 
             # Read the aliases
             aliases_list = self.config_get('ALIASES', config, split_count=1)

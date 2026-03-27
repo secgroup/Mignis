@@ -183,6 +183,11 @@ Each configuration file needs 6 sections:
       NAT reflection to identify which interfaces are external and
       which are internal (LAN). Hairpin rules are generated for all
       non-WAN interfaces.
+   -  ``pub=IP``: specifies the real public IP address for NAT reflection
+      when the WAN interface is behind a double NAT (e.g. ISP router).
+      In this case, the DNAT rules use the local WAN IP for external
+      traffic, while hairpin rules use the public IP that LAN clients
+      connect to. Example: ``ext eth0 172.16.21.0/24 wan pub=93.92.241.21``
 -  **ALIASES**: defines aliases for IP addresses. The syntax is
    ``alias ip-address``.
 -  **FIREWALL**: contains abstract rules. The syntax is
