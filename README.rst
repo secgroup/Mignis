@@ -1,9 +1,10 @@
 Mignis
 ======
 
-Mignis is a semantic based tool for firewall configuration. It is designed to help 
-writing **iptables rules** using an more **human-readable syntax**, 
-without restricting iptables functionalities.
+Mignis is a semantic based tool for firewall configuration. It is designed to help
+writing **iptables rules** using a more **human-readable syntax**,
+without restricting iptables functionalities. It can also generate Linux
+Traffic Control rules for egress bandwidth limits.
 
 The traslation from Mignis syntax into the corresponding iptables ruleset has been
 **formally verified** in a paper published in Computer Security Foundations Symposium (CSF), 2014:
@@ -15,7 +16,10 @@ Requirements
 ~~~~~~~~~~~~
 
 -  Python 3.6 or higher.
--  No external dependencies (uses the standard library ``ipaddress`` module).
+-  No external Python package dependencies (uses the standard library
+   ``ipaddress`` module).
+-  ``iptables`` for firewall rule execution.
+-  ``tc`` from ``iproute2`` when using the optional ``LIMITS`` section.
 
 Installation
 ~~~~~~~~~~~~
@@ -67,23 +71,24 @@ Usage
           -f, --force           force rule execution or writing
 
         possible actions::
-          -F, --flush           flush iptables ruleset
+          -F, --flush           flush iptables ruleset and Mignis traffic shaping
           -c filename, --config filename
                                 read mignis rules from file
 
         options for --config/-c:
           -w filename, --write filename
-                                write the rules to file
+                                write rules to file (and filename.tc when shaping)
           -e, --execute         execute the rules without writing to file
           -q query, --query query
                                 perform a query over the configuration (unstable)
 
 Mignis takes a configuration file and generates a series of iptables
-rules.
+rules and, when requested, traffic-control rules.
 
-Rules can either be written to a file (in a format parsable by the
-``iptables-restore`` command) or directly executed via the ``iptables``
-command.
+Rules can either be written to files or directly applied. Without traffic
+limits, ``-w`` keeps its original behavior and writes only an
+``iptables-restore`` file. When ``LIMITS`` is present, it also writes a
+``.tc`` sidecar suitable for ``tc -batch``.
 
 Usage example:
 
@@ -94,6 +99,14 @@ Usage example:
 This will create an *ex\_simple.iptables* file from the
 *ex\_simple.config* configuration. To actually use the rules we just
 have to execute ``iptables-restore ex_simple.iptables``.
+
+For a configuration containing bandwidth limits:
+
+.. code:: bash
+
+    ./mignis.py -c examples/ex_limits.config -w ex_limits.iptables
+    iptables-restore ex_limits.iptables
+    tc -batch ex_limits.iptables.tc
 
 Configuration file example
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -153,12 +166,22 @@ Configuration file example
     * // *  udp
     * / *
 
+    LIMITS
+    # aggregate WAN egress and upload ceiling for mypc
+    on ext * > * 100mbit
+    on ext mypc > * 10mbit
+
+    # aggregate LAN egress and download ceiling for mypc
+    on lan * > * 100mbit
+    on lan * > mypc 25mbit
+
     CUSTOM
     # log and accept packets on port 7792
     -A INPUT -p tcp --dport 7792 -j LOG --log-prefix "PORT 7792 "
     -A INPUT -p tcp --dport 7792 -j ACCEPT
 
-Each configuration file needs 6 sections:
+Each configuration file needs 6 sections. ``LIMITS`` is an optional
+seventh section:
 
 -  **OPTIONS**: at the moment two generic mignis options can be
    specified:
@@ -223,6 +246,35 @@ Each configuration file needs 6 sections:
    and udp packets, while we're dropping the rest (this last rule may be
    omitted, we wrote it there only for clarity).
 
+-  **LIMITS**: optionally defines egress bandwidth ceilings using:
+   ``on interface from > to rate``. The interface is a Mignis interface
+   alias and is the actual egress shaping point. ``from`` and ``to`` can
+   be ``*``, an interface alias, an IP alias, an IPv4 address or an IPv4
+   subnet. The special ``local`` alias is not currently a selector; use
+   a concrete local IPv4 address instead. Rates accept ``bit``, ``kbit``,
+   ``mbit`` and ``gbit``.
+
+   Every shaped interface must have exactly one aggregate ``* > *``
+   limit. More specific limits become child classes and cannot exceed
+   the aggregate rate:
+
+   ::
+
+       LIMITS
+       on ext * > * 100mbit
+       on ext mypc > * 10mbit
+       on lan * > * 100mbit
+       on lan * > mypc 25mbit
+
+   In this example, traffic leaving ``ext`` is capped at 100 Mbit/s and
+   traffic sourced by ``mypc`` at 10 Mbit/s. Traffic leaving ``lan`` is
+   capped at 100 Mbit/s and traffic destined for ``mypc`` at 25 Mbit/s.
+   The specific limits are ceilings, not bandwidth reservations.
+
+   Specific selectors on the same egress interface must not overlap.
+   Mignis rejects ambiguous overlaps rather than making their meaning
+   depend on configuration order.
+
 -  **CUSTOM**: contains raw iptables rules. Note that you can also
    modify the tool's behavior here, since you can use the *-D* and *-I*
    switches for deleting and inserting rules in specific locations. We
@@ -230,6 +282,28 @@ Each configuration file needs 6 sections:
    that your custom rules will not conflict with the abstract ones, so
    please use this section with care and only if you know what you're
    doing.
+
+Traffic shaping behavior
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+Traffic limits currently apply to IPv4 egress traffic. Mignis uses an
+HTB hierarchy with ``fq_codel`` leaf queues. Packets are classified in
+``mangle/POSTROUTING`` before source NAT and then selected by ``tc``
+through firewall marks. The upper 16 bits of the packet mark are reserved
+for this purpose; the lower 16 bits are preserved.
+
+Applying a shaping configuration replaces the root qdisc on each managed
+interface. Interactive execution reports an existing non-Mignis qdisc
+before asking for confirmation; ``--force`` explicitly permits its
+replacement. Mignis records managed interfaces in
+``/run/mignis/tc-state.json``. Applying a later configuration without a
+previously managed interface, or running ``--flush``, removes only root
+qdiscs carrying Mignis' reserved handle.
+
+The current implementation does not shape ingress directly. Downloads
+through a router are shaped at the egress side of the destination
+interface, as in ``on lan * > mypc 25mbit``. Direct ingress shaping with
+IFB is left for a future version.
 
 Firewall rules examples
 ^^^^^^^^^^^^^^^^^^^^^^^
@@ -349,3 +423,23 @@ Future work for Mignis v2
 -  Accept different kinds of configuration files (e.g. JSON, python
    scripts) and/or consider a richer language for writing the rules.
 -  Provide a 2nd-level abstract semantic using security roles.
+
+Testing
+~~~~~~~
+
+The deterministic parser and rule-generation tests use only the Python
+standard library:
+
+.. code:: bash
+
+    python3 -m unittest discover -s tests -v
+
+An end-to-end Docker laboratory routes two clients through a Mignis
+container and checks the aggregate and per-IP ceilings with ``iperf3``:
+
+.. code:: bash
+
+    tests/integration/traffic_shaping/run.sh
+
+The Docker test requires access to the Docker daemon. The router and
+clients receive ``NET_ADMIN``; privileged mode is not required.

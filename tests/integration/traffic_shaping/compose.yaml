@@ -1,0 +1,78 @@
+name: mignis-traffic-shaping-test
+
+x-test-runtime: &test-runtime
+  image: mignis-traffic-shaping-test
+  pull_policy: never
+  stop_grace_period: 1s
+
+services:
+  router:
+    <<: *test-runtime
+    build:
+      context: ../../..
+      dockerfile: tests/integration/traffic_shaping/Dockerfile
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    networks:
+      lan:
+        ipv4_address: 10.77.10.254
+        interface_name: lan0
+      wan:
+        ipv4_address: 10.77.20.254
+        interface_name: wan0
+
+  client-a:
+    <<: *test-runtime
+    depends_on:
+      - router
+    cap_add:
+      - NET_ADMIN
+    command:
+      - /bin/sh
+      - -c
+      - ip route replace 10.77.20.0/24 via 10.77.10.254; exec sleep infinity
+    networks:
+      lan:
+        ipv4_address: 10.77.10.10
+
+  client-b:
+    <<: *test-runtime
+    depends_on:
+      - router
+    cap_add:
+      - NET_ADMIN
+    command:
+      - /bin/sh
+      - -c
+      - ip route replace 10.77.20.0/24 via 10.77.10.254; exec sleep infinity
+    networks:
+      lan:
+        ipv4_address: 10.77.10.11
+
+  server:
+    <<: *test-runtime
+    depends_on:
+      - router
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        iperf3 -s -p 5201 &
+        exec iperf3 -s -p 5202
+    networks:
+      wan:
+        ipv4_address: 10.77.20.10
+
+networks:
+  lan:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.77.10.0/24
+  wan:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.77.20.0/24

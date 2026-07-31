@@ -14,6 +14,7 @@ Features:
 - Automatic rule optimization
 - NAT support (SNAT, DNAT, Masquerade)
 - NAT reflection/hairpinning support (allows LAN clients to access services via public IP)
+- Egress bandwidth limits using Linux Traffic Control
 - Formally verified translation (CSF 2014)
 
 For usage instructions type:
@@ -25,14 +26,17 @@ Requires: Python 3.6+
 
 import argparse
 import bisect
+import json
 import os
 import pprint
 import re
+import subprocess
 import sys
 import tempfile
 import traceback
 
 from collections import Counter, OrderedDict
+from decimal import Decimal, InvalidOperation
 from ipaddress import AddressValueError, IPv4Address, IPv4Network
 from ipaddr_ext import IPv4Range
 from itertools import product
@@ -796,6 +800,105 @@ class MignisConfigException(Exception):
     pass
 
 
+class TrafficLimit:
+    '''A traffic shaping rule applied to the egress side of an interface.'''
+
+    RATE_MULTIPLIERS = {
+        'bit': Decimal(1),
+        'kbit': Decimal(1000),
+        'mbit': Decimal(1000 * 1000),
+        'gbit': Decimal(1000 * 1000 * 1000),
+    }
+
+    def __init__(self,
+                 interface_alias: str,
+                 interface: str,
+                 source: Optional[Union[IPv4Address, IPv4Network]],
+                 destination: Optional[Union[IPv4Address, IPv4Network]],
+                 source_text: str,
+                 destination_text: str,
+                 rate: str,
+                 abstract: str) -> None:
+        self.interface_alias = interface_alias
+        self.interface = interface
+        self.source = source
+        self.destination = destination
+        self.source_text = source_text
+        self.destination_text = destination_text
+        self.rate = rate.lower()
+        self.rate_bps = self._parse_rate(self.rate)
+        self.abstract = abstract
+        self.class_minor = None
+        self.mark = None
+
+    @classmethod
+    def _parse_rate(cls, rate: str) -> int:
+        match = re.fullmatch(r'([1-9][0-9]*(?:\.[0-9]+)?)(bit|kbit|mbit|gbit)', rate.lower())
+        if not match:
+            raise MignisConfigException(
+                f'Invalid traffic limit rate "{rate}". '
+                'Use a positive value followed by bit, kbit, mbit or gbit.')
+
+        try:
+            bits_per_second = Decimal(match.group(1)) * cls.RATE_MULTIPLIERS[match.group(2)]
+        except InvalidOperation:
+            raise MignisConfigException(f'Invalid traffic limit rate "{rate}".')
+
+        if bits_per_second < 1000:
+            raise MignisConfigException(
+                f'Traffic limit rate "{rate}" is too small; the minimum supported rate is 1kbit.')
+        return int(bits_per_second)
+
+    @property
+    def is_interface_limit(self) -> bool:
+        return self.source is None and self.destination is None
+
+    @staticmethod
+    def _interval(address: Optional[Union[IPv4Address, IPv4Network]]) -> Tuple[int, int]:
+        if address is None:
+            return (0, (1 << 32) - 1)
+        if isinstance(address, IPv4Network):
+            return (int(address.network_address), int(address.broadcast_address))
+        value = int(address)
+        return (value, value)
+
+    def overlaps(self, other: 'TrafficLimit') -> bool:
+        if self.interface != other.interface:
+            return False
+
+        self_source = self._interval(self.source)
+        other_source = self._interval(other.source)
+        self_destination = self._interval(self.destination)
+        other_destination = self._interval(other.destination)
+
+        source_overlaps = self_source[0] <= other_source[1] and other_source[0] <= self_source[1]
+        destination_overlaps = (
+            self_destination[0] <= other_destination[1] and
+            other_destination[0] <= self_destination[1]
+        )
+        return source_overlaps and destination_overlaps
+
+    def sort_key(self) -> Tuple[Any, ...]:
+        source = self._interval(self.source)
+        destination = self._interval(self.destination)
+        return (
+            self.interface,
+            source[0],
+            source[1],
+            destination[0],
+            destination[1],
+            self.rate_bps,
+        )
+
+    def iptables_match(self) -> str:
+        parts = [f'-o {self.interface}']
+        if self.source is not None:
+            parts.append(f'-s {self.source}')
+        if self.destination is not None:
+            parts.append(f'-d {self.destination}')
+        return ' '.join(parts)
+
+
 class Mignis:
     '''Main Mignis firewall configuration manager.
 
@@ -822,7 +925,26 @@ class Mignis:
     intf = {}
     iptables_rules = []
 
+    TC_CHAIN = 'MIGNIS_TC'
+    TC_ROOT_HANDLE = '1d00:'
+    TC_ROOT_MAJOR = '1d00'
+    TC_DEFAULT_MINOR = 0x2
+    TC_FIRST_FLOW_MINOR = 0x10
+    TC_LEAF_MAJOR = 0x1e00
+    TC_MARK_MASK = 0xffff0000
+    TC_MARK_SHIFT = 16
+    TC_STATE_VERSION = 1
+    TC_STATE_FILE = '/run/mignis/tc-state.json'
+
     def __init__(self, config_file, debug, force, dryrun, write_rules_filename, execute_rules, flush):
+        # These used to be class attributes. Keep all generated state per instance,
+        # otherwise multiple Mignis objects in the same process leak rules into one another.
+        self.old_rules = []
+        self.intf = {}
+        self.iptables_rules = []
+        self.tc_rules = []
+        self.traffic_limits = []
+        self.traffic_limit_groups = {}
         self.config_file = config_file
         self.debug = debug
         self.force = force
@@ -842,16 +964,33 @@ class Mignis:
         if self.debug >= 1:
             print(s)
 
-    def execute(self, cmd):
-        '''Execute the command s only if we are not in dryrun mode
-        '''
-        # TODO: use subprocess.check_call with try/except in place of system
-        if not self.dryrun:
-            if self.debug >= 2:
-                print('COMMAND: ' + cmd)
-            ret = os.system(cmd)
-            if ret:
-                raise MignisException(self, 'Command execution error (code: {0}).'.format(ret))
+    def execute(self, command, capture_output=False):
+        '''Execute a command without invoking a shell.'''
+        if self.dryrun:
+            return None
+
+        if self.debug >= 2:
+            print('COMMAND: ' + ' '.join(command))
+
+        try:
+            result = subprocess.run(
+                command,
+                check=False,
+                universal_newlines=True,
+                stdout=subprocess.PIPE if capture_output else None,
+                stderr=subprocess.PIPE,
+            )
+        except OSError as error:
+            raise MignisException(
+                self, f'Unable to execute "{command[0]}": {error}')
+
+        if result.returncode:
+            detail = result.stderr.strip()
+            message = f'Command execution error (code: {result.returncode}).'
+            if detail:
+                message += '\n' + detail
+            raise MignisException(self, message)
+        return result
 
     def test_exec_rules(self):
         # Create temp file for writing the rules
@@ -867,25 +1006,26 @@ class Mignis:
         os.unlink(temp_file)
 
     def exec_rules(self, temp_file, force_dryrun=False):
-        options = ' '
+        command = ['iptables-restore']
         if self.dryrun or force_dryrun:
-            options += '--test '
+            command.append('--test')
+        command.append(temp_file)
 
         try:
             # Execute the rules
-            self.execute('iptables-restore' + options + temp_file)
+            self.execute(command)
         except MignisException as e:
             raise MignisException(
                 self, str(e) + '\nThe temporary file which generated the error is stored in "{0}"'.format(temp_file))
 
-    def write_rules(self, filename, fd=None):
+    def write_rules(self, filename, fd=None, output_checked=False):
         if self.dryrun:
             return
 
-        if fd:
+        if fd is not None:
             f = os.fdopen(fd, 'w')
         else:
-            if not self.force and os.path.exists(filename):
+            if not output_checked and not self.force and os.path.exists(filename):
                 raise MignisException(self, 'The file already exists, use -f to overwrite.')
             f = open(filename, 'w')
 
@@ -917,17 +1057,201 @@ class Mignis:
 
         f.close()
 
+    def write_tc_rules(self, filename, fd=None, output_checked=False):
+        if self.dryrun or not self.tc_rules:
+            return
+
+        if fd is not None:
+            f = os.fdopen(fd, 'w')
+        else:
+            if not output_checked and not self.force and os.path.exists(filename):
+                raise MignisException(self, 'The file already exists, use -f to overwrite.')
+            f = open(filename, 'w')
+
+        for rule in self.tc_rules:
+            f.write(rule + '\n')
+        f.close()
+
+    def write_all_rules(self, filename):
+        output_files = [filename]
+        tc_filename = filename + '.tc'
+        if self.tc_rules:
+            output_files.append(tc_filename)
+
+        if not self.force:
+            for output_file in output_files:
+                if os.path.exists(output_file):
+                    raise MignisException(
+                        self, f'The file "{output_file}" already exists, use -f to overwrite.')
+
+        self.write_rules(filename, output_checked=True)
+        if self.tc_rules:
+            self.write_tc_rules(tc_filename, output_checked=True)
+        return output_files
+
+    def _tc_state_path(self):
+        return os.environ.get('MIGNIS_TC_STATE_FILE', self.TC_STATE_FILE)
+
+    def _load_tc_state(self):
+        state_path = self._tc_state_path()
+        if not os.path.exists(state_path):
+            return []
+
+        try:
+            with open(state_path) as state_file:
+                state = json.load(state_file)
+            if state.get('version') != self.TC_STATE_VERSION:
+                raise ValueError('unsupported state version')
+            interfaces = state.get('interfaces')
+            if not isinstance(interfaces, list):
+                raise ValueError('invalid interface list')
+            if not all(isinstance(interface, str) and
+                       re.fullmatch(r'[a-zA-Z0-9_.-]{1,15}', interface)
+                       for interface in interfaces):
+                raise ValueError('invalid interface name')
+            return interfaces
+        except (OSError, AttributeError, ValueError, TypeError, json.JSONDecodeError) as error:
+            self.warning(f'Ignoring invalid traffic-control state "{state_path}": {error}')
+            return []
+
+    def _save_tc_state(self, interfaces):
+        state_path = self._tc_state_path()
+        state_directory = os.path.dirname(state_path) or '.'
+
+        if not interfaces:
+            if os.path.exists(state_path):
+                os.unlink(state_path)
+            return
+
+        temporary_state = None
+        try:
+            os.makedirs(state_directory, exist_ok=True)
+            state_fd, temporary_state = tempfile.mkstemp(
+                prefix='.tc-state-', suffix='.json', dir=state_directory)
+            with os.fdopen(state_fd, 'w') as state_file:
+                json.dump({
+                    'version': self.TC_STATE_VERSION,
+                    'interfaces': sorted(interfaces),
+                }, state_file)
+                state_file.write('\n')
+            os.replace(temporary_state, state_path)
+        except OSError as error:
+            if temporary_state and os.path.exists(temporary_state):
+                try:
+                    os.unlink(temporary_state)
+                except OSError:
+                    pass
+            raise MignisException(
+                self, f'Unable to save traffic-control state "{state_path}": {error}')
+
+    def _root_qdisc(self, interface):
+        result = self.execute(
+            ['tc', '-j', 'qdisc', 'show', 'dev', interface],
+            capture_output=True,
+        )
+        try:
+            qdiscs = json.loads(result.stdout)
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise MignisException(
+                self, f'Unable to parse tc state for interface "{interface}": {error}')
+
+        for qdisc in qdiscs:
+            if qdisc.get('root') is True:
+                return qdisc
+        return None
+
+    def _is_mignis_qdisc(self, qdisc):
+        return (
+            qdisc is not None and
+            qdisc.get('kind') == 'htb' and
+            str(qdisc.get('handle', '')).lower() == self.TC_ROOT_HANDLE
+        )
+
+    def tc_conflicts(self):
+        conflicts = []
+        for interface in sorted(self.traffic_limit_groups):
+            qdisc = self._root_qdisc(interface)
+            if qdisc is None or self._is_mignis_qdisc(qdisc):
+                continue
+            if qdisc.get('kind') == 'noqueue' and str(qdisc.get('handle')) == '0:':
+                continue
+            conflicts.append(
+                f'{interface}: existing root qdisc '
+                f'{qdisc.get("kind", "unknown")} {qdisc.get("handle", "")}'.strip())
+        return conflicts
+
+    def apply_tc_rules(self):
+        '''Apply generated tc rules and remove stale Mignis-owned qdiscs.'''
+        previous_interfaces = set(self._load_tc_state())
+        current_interfaces = set(self.traffic_limit_groups)
+
+        if self.tc_rules:
+            # "tc qdisc replace" cannot change every existing root qdisc
+            # in place (notably an existing HTB root). Remove only a root
+            # carrying Mignis' reserved handle before rebuilding its tree.
+            for interface in sorted(current_interfaces):
+                qdisc = self._root_qdisc(interface)
+                if self._is_mignis_qdisc(qdisc):
+                    self.execute(['tc', 'qdisc', 'del', 'dev', interface, 'root'])
+
+            temp_fd, temp_file = tempfile.mkstemp(suffix='.tc', prefix='mignis_')
+            self.write_tc_rules(None, fd=temp_fd)
+            try:
+                self.execute(['tc', '-batch', temp_file])
+            except MignisException as error:
+                # Avoid leaving an untracked partial class tree when a later
+                # command in the batch fails.
+                for interface in sorted(current_interfaces):
+                    try:
+                        qdisc = self._root_qdisc(interface)
+                        if self._is_mignis_qdisc(qdisc):
+                            self.execute(['tc', 'qdisc', 'del', 'dev', interface, 'root'])
+                    except MignisException as cleanup_error:
+                        self.warning(
+                            f'Unable to clean partial traffic shaping on '
+                            f'"{interface}": {cleanup_error}')
+                raise MignisException(
+                    self,
+                    str(error) +
+                    f'\nThe temporary tc batch which generated the error is stored in "{temp_file}"')
+            else:
+                os.unlink(temp_file)
+
+        stale_interfaces_to_retry = set()
+        for interface in sorted(previous_interfaces - current_interfaces):
+            try:
+                qdisc = self._root_qdisc(interface)
+            except MignisException as error:
+                self.warning(
+                    f'Unable to inspect stale traffic shaping on "{interface}": {error}')
+                stale_interfaces_to_retry.add(interface)
+                continue
+            if self._is_mignis_qdisc(qdisc):
+                self.execute(['tc', 'qdisc', 'del', 'dev', interface, 'root'])
+            elif qdisc is not None:
+                self.warning(
+                    f'Not removing non-Mignis root qdisc from stale interface "{interface}".')
+
+        self._save_tc_state(current_interfaces | stale_interfaces_to_retry)
+
     def apply_rules(self):
         print('\n[*] Applying rules')
         if self.dryrun:
             print('\n[*] Rules not applied (dryrun mode)')
         else:
             if self.write_rules_filename:
-                self.write_rules(self.write_rules_filename)
-                print('\n[*] Rules written.')
+                output_files = self.write_all_rules(self.write_rules_filename)
+                print('\n[*] Rules written to:')
+                for output_file in output_files:
+                    print(f'    {output_file}')
             else:
+                conflicts = self.tc_conflicts()
+                for conflict in conflicts:
+                    self.warning(
+                        'Traffic shaping will replace a root qdisc: ' + conflict)
                 if self.force:
                     self.test_exec_rules()
+                    self.apply_tc_rules()
                     print('\n[*] Rules applied.')
                 else:
                     execute = ''
@@ -939,6 +1263,7 @@ class Mignis:
                             execute = raw_input('Apply the rules? [y|n]: ').lower()
                     if execute == 'y':
                         self.test_exec_rules()
+                        self.apply_tc_rules()
                         print('[*] Rules applied.')
                     else:
                         print('[!] Rules NOT applied.')
@@ -994,6 +1319,72 @@ class Mignis:
             print('iptables ' + r)
         self.iptables_rules.append(r)
 
+    def add_tc_rule(self, rule):
+        if self.debug >= 1:
+            print('tc ' + rule)
+        self.tc_rules.append(rule)
+
+    def traffic_control_rules(self):
+        '''Generate packet marks and tc HTB classes for LIMITS rules.'''
+        if not self.traffic_limit_groups:
+            return
+
+        self.wr('\n## Traffic shaping')
+        self.add_iptables_rule(f'-t mangle -N {self.TC_CHAIN}')
+        self.add_iptables_rule(f'-t mangle -A POSTROUTING -j {self.TC_CHAIN}')
+
+        # Clear only the mark bits reserved by Mignis, and only for managed
+        # egress interfaces. Other fwmark users retain the lower 16 bits.
+        for interface in sorted(self.traffic_limit_groups):
+            self.add_iptables_rule(
+                f'-t mangle -A {self.TC_CHAIN} -o {interface} '
+                f'-j MARK --set-xmark 0x00000000/0x{self.TC_MARK_MASK:08x}')
+
+        for interface in sorted(self.traffic_limit_groups):
+            group = self.traffic_limit_groups[interface]
+            aggregate = group['aggregate']
+            flows = group['flows']
+
+            self.add_tc_rule(
+                f'qdisc replace dev {interface} root handle {self.TC_ROOT_HANDLE} '
+                f'htb default {self.TC_DEFAULT_MINOR:x}')
+            self.add_tc_rule(
+                f'class replace dev {interface} parent {self.TC_ROOT_HANDLE} '
+                f'classid {self.TC_ROOT_MAJOR}:1 htb '
+                f'rate {aggregate.rate} ceil {aggregate.rate}')
+            self.add_tc_rule(
+                f'class replace dev {interface} parent {self.TC_ROOT_MAJOR}:1 '
+                f'classid {self.TC_ROOT_MAJOR}:{self.TC_DEFAULT_MINOR:x} htb '
+                f'rate 1kbit ceil {aggregate.rate}')
+            self.add_tc_rule(
+                f'qdisc replace dev {interface} parent '
+                f'{self.TC_ROOT_MAJOR}:{self.TC_DEFAULT_MINOR:x} '
+                f'handle {self.TC_LEAF_MAJOR:x}: fq_codel')
+
+            for index, flow_limit in enumerate(flows, start=1):
+                self.add_iptables_rule(
+                    f'-t mangle -A {self.TC_CHAIN} {flow_limit.iptables_match()} '
+                    f'-j MARK --set-xmark '
+                    f'0x{flow_limit.mark:08x}/0x{self.TC_MARK_MASK:08x}')
+
+                class_minor = flow_limit.class_minor
+                leaf_major = self.TC_LEAF_MAJOR + index
+                self.add_tc_rule(
+                    f'class replace dev {interface} parent {self.TC_ROOT_MAJOR}:1 '
+                    f'classid {self.TC_ROOT_MAJOR}:{class_minor:x} htb '
+                    f'rate 1kbit ceil {flow_limit.rate}')
+                self.add_tc_rule(
+                    f'qdisc replace dev {interface} parent '
+                    f'{self.TC_ROOT_MAJOR}:{class_minor:x} '
+                    f'handle {leaf_major:x}: fq_codel')
+                self.add_tc_rule(
+                    f'filter replace dev {interface} parent {self.TC_ROOT_HANDLE} '
+                    f'protocol ip priority 10 '
+                    f'handle 0x{flow_limit.mark:08x}/0x{self.TC_MARK_MASK:08x} '
+                    f'fw classid {self.TC_ROOT_MAJOR}:{class_minor:x}')
+
+        self.wr('\n##\n')
+
     def prune_duplicated_rules(self):
         if self.debug >= 1:
             pruned = [item for item, count in Counter(self.iptables_rules).items() if count > 1]
@@ -1019,6 +1410,7 @@ class Mignis:
         self.firewall_rules()
         self.policies_rules()
         self.ip_intf_binding_rules()
+        self.traffic_control_rules()
         self.custom_rules()
         if self.options['logging'] == 'yes':
             self.log_rules()
@@ -1409,14 +1801,16 @@ class Mignis:
 
         self.wr('##')
 
-    def config_get(self, what, config, split_separator=r'\s+', split_count=0, split=True):
+    def config_get(self, what, config, split_separator=r'\s+', split_count=0, split=True, required=True):
         '''Read a configuration section. 'what' is the configuration section name,
         while 'config' is the whole configuration as a string.
         Returns a list where each element is a line, and every element is a list
         containing the line splitted by 'split_separator'.
         '''
         if what not in config:
-            raise MignisConfigException(f'Missing section "{what}" in the configuration file.')
+            if required:
+                raise MignisConfigException(f'Missing section "{what}" in the configuration file.')
+            return []
 
         r = re.search(r'(.*?)(\n*\Z)', config[what], re.DOTALL)
         if r and r.groups():
@@ -1430,6 +1824,144 @@ class Mignis:
             return r
         else:
             return None
+
+    def _resolve_traffic_limit_address(
+            self, value: str) -> Optional[Union[IPv4Address, IPv4Network]]:
+        '''Resolve a LIMITS address to an IPv4 host/network, or None for "*".'''
+        if value == '*':
+            return None
+
+        if value == 'local':
+            raise MignisConfigException(
+                'The special "local" alias is not supported in LIMITS selectors; '
+                'use a concrete local IPv4 address instead.')
+
+        if value in self.intf:
+            subnet = self.intf[value][1]
+            if subnet is None:
+                raise MignisConfigException(
+                    f'Interface alias "{value}" has no subnet and cannot be used in a traffic selector.')
+            return subnet
+
+        visited = set()
+        resolved = value
+        while resolved in self.aliases:
+            if resolved in visited:
+                raise MignisConfigException(
+                    f'Alias cycle found while resolving traffic selector "{value}".')
+            visited.add(resolved)
+            resolved = self.aliases[resolved]
+
+        if any(character in resolved for character in '(),:'):
+            raise MignisConfigException(
+                f'Traffic selector "{value}" must resolve to one IPv4 address or subnet.')
+
+        try:
+            if '/' in resolved:
+                return IPv4Network(resolved, strict=True)
+            return IPv4Address(resolved)
+        except ValueError:
+            raise MignisConfigException(
+                f'Invalid IPv4 address, subnet or alias "{value}" in LIMITS.')
+
+    def read_traffic_limits(self, config):
+        '''Parse and validate the optional LIMITS section.
+
+        Syntax:
+            on INTERFACE FROM > TO RATE
+
+        All limits shape egress traffic on INTERFACE. A catch-all "* > *"
+        rule is required as the aggregate interface rate when flow-specific
+        limits are present.
+        '''
+        raw_limits = self.config_get('LIMITS', config, split=False, required=False)
+        limits = []
+
+        for raw_limit in raw_limits:
+            parts = raw_limit.split()
+            if len(parts) != 6 or parts[0].lower() != 'on' or parts[3] != '>':
+                raise MignisConfigException(
+                    f'Bad traffic limit "{raw_limit}". '
+                    'Expected: on INTERFACE FROM > TO RATE')
+
+            _, interface_alias, source_text, _, destination_text, rate = parts
+            if interface_alias not in self.intf:
+                raise MignisConfigException(
+                    f'Unknown interface alias "{interface_alias}" in traffic limit "{raw_limit}".')
+
+            interface = self.intf[interface_alias][0]
+            if not re.fullmatch(r'[a-zA-Z0-9_.-]{1,15}', interface):
+                raise MignisConfigException(
+                    f'Interface name "{interface}" cannot be safely used with tc.')
+
+            source = self._resolve_traffic_limit_address(source_text)
+            destination = self._resolve_traffic_limit_address(destination_text)
+            limits.append(TrafficLimit(
+                interface_alias,
+                interface,
+                source,
+                destination,
+                source_text,
+                destination_text,
+                rate,
+                raw_limit,
+            ))
+
+        groups = {}
+        for limit in limits:
+            groups.setdefault(limit.interface, []).append(limit)
+
+        validated_limits = []
+        for interface in sorted(groups):
+            interface_limits = groups[interface]
+            aggregate_limits = [limit for limit in interface_limits if limit.is_interface_limit]
+            flow_limits = [limit for limit in interface_limits if not limit.is_interface_limit]
+
+            if len(aggregate_limits) != 1:
+                if not aggregate_limits:
+                    raise MignisConfigException(
+                        f'Interface "{interface}" has flow-specific traffic limits but no '
+                        'aggregate "on INTERFACE * > * RATE" limit.')
+                raise MignisConfigException(
+                    f'Interface "{interface}" has more than one aggregate traffic limit.')
+
+            aggregate = aggregate_limits[0]
+            for flow_limit in flow_limits:
+                if flow_limit.rate_bps > aggregate.rate_bps:
+                    raise MignisConfigException(
+                        f'Traffic limit "{flow_limit.abstract}" exceeds the aggregate '
+                        f'interface rate {aggregate.rate}.')
+
+            for index, flow_limit in enumerate(flow_limits):
+                for other in flow_limits[index + 1:]:
+                    if flow_limit.overlaps(other):
+                        raise MignisConfigException(
+                            'Overlapping traffic limits are ambiguous:\n'
+                            f'- {flow_limit.abstract}\n'
+                            f'- {other.abstract}')
+
+            flow_limits.sort(key=lambda limit: limit.sort_key())
+            max_flow_count = min(
+                0xffff - self.TC_FIRST_FLOW_MINOR,
+                0xffff - self.TC_LEAF_MAJOR,
+            )
+            if len(flow_limits) > max_flow_count:
+                raise MignisConfigException(
+                    f'Too many traffic limits on interface "{interface}".')
+
+            for index, flow_limit in enumerate(flow_limits):
+                flow_limit.class_minor = self.TC_FIRST_FLOW_MINOR + index
+                flow_limit.mark = flow_limit.class_minor << self.TC_MARK_SHIFT
+
+            groups[interface] = {
+                'aggregate': aggregate,
+                'flows': flow_limits,
+            }
+            validated_limits.append(aggregate)
+            validated_limits.extend(flow_limits)
+
+        self.traffic_limits = validated_limits
+        self.traffic_limit_groups = groups
 
     def config_split_ipport(self, s):
         '''Split an address in the form [ip|interface_alias]:port1[-port2]
@@ -1605,8 +2137,9 @@ class Mignis:
 
         filename = self.config_dir + '/' + filename
         try:
-            return open(filename).read().strip()
-        except:
+            with open(filename) as included_file:
+                return included_file.read().strip()
+        except OSError:
             raise MignisConfigException('Unable to read file "{0}" for inclusion.'.format(filename))
 
     def read_config(self):
@@ -1615,7 +2148,8 @@ class Mignis:
         try:
             print("[*] Reading the configuration")
             self.config_dir = os.path.dirname(self.config_file)
-            config = open(self.config_file).read()
+            with open(self.config_file) as config_file:
+                config = config_file.read()
 
             # Execute the @include directives (recursively)
             old_config = ''
@@ -1627,7 +2161,7 @@ class Mignis:
             config = re.sub(r'[ \t]+', ' ', config)
 
             # Split by section
-            config = re.split(r'(OPTIONS|INTERFACES|ALIASES|FIREWALL|POLICIES|CUSTOM)\n', config)[1:]
+            config = re.split(r'(OPTIONS|INTERFACES|ALIASES|FIREWALL|POLICIES|LIMITS|CUSTOM)\n', config)[1:]
             config = dict(zip(config[::2], config[1::2]))
 
             # Read the options
@@ -1641,7 +2175,7 @@ class Mignis:
             # Read the interfaces
             intf = self.config_get('INTERFACES', config)
             for x in list(intf):
-                if 3 > len(x) > 4:
+                if len(x) < 3:
                     raise MignisConfigException('Bad interface declaration "{0}".'.format(' '.join(x)))
                 intf_alias, intf_name, intf_subnet = x[:3]
                 intf_options = x[3:] if len(x) >= 4 else []
@@ -1672,6 +2206,9 @@ class Mignis:
             for alias, val in self.aliases.items():
                 # Match value when surrounded by non-alphanumeric characters (for inverse replacement)
                 self.inverse_alias_regexp[val] = re.compile(rf'(?<=[^a-zA-Z0-9\-_]){re.escape(val)}(?=[^a-zA-Z0-9\-_])')
+
+            # Read the optional egress traffic shaping rules.
+            self.read_traffic_limits(config)
 
             # Compile the rules regexp
             allowed_chars = r'[a-zA-Z0-9\./\*_\-:,\(\) ]'
@@ -1710,14 +2247,16 @@ def parse_args():
                                      add_help=False)
     parser.add_argument('--help', '-h', action='help', help='show this help message and exit')
     action_group = parser.add_argument_group('possible actions:')
-    action_group.add_argument('-F', '--flush', dest='flush', help='flush iptables ruleset',
+    action_group.add_argument('-F', '--flush', dest='flush',
+                              help='flush iptables ruleset and Mignis traffic shaping',
                               required=False, action='store_true')
     action_group.add_argument('-c', '--config', dest='config_file', metavar='filename',
                               help='read mignis rules from file', required=False)
     config_group = parser.add_argument_group('options for --config/-c')
     config_group = config_group.add_mutually_exclusive_group(required=False)
     config_group.add_argument('-w', '--write', dest='write_rules_filename', metavar='filename',
-                              help='write the rules to file', required=False)
+                              help='write rules to file (and filename.tc when shaping)',
+                              required=False)
     config_group.add_argument('-e', '--execute', dest='execute_rules', 
                               help='execute the rules without writing to file', required=False, 
                               action='store_true')

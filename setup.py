@@ -2,8 +2,8 @@ from setuptools import setup
 
 
 def readme():
-    with open('README.rst') as f:
-        return f.read()
+    with open('README.rst') as readme_file:
+        return readme_file.read()
 
 
 setup(
@@ -11,10 +11,11 @@ setup(
     py_modules=['mignis', 'ipaddr_ext'],
     version='0.9.6',
     license='MIT',
-    description='Mignis is a semantic based tool for firewall configuration with NAT reflection support',
+    description='Semantic firewall configuration with NAT reflection and traffic shaping support',
     long_description=readme(),
     url='https://github.com/segroup/Mignis',
-    keywords=['iptables', 'firewall', 'semantic firewall configuration', 'netfilter', 'nat reflection', 'hairpinning'],
+    keywords=['iptables', 'firewall', 'semantic firewall configuration', 'netfilter',
+              'nat reflection', 'hairpinning', 'traffic shaping', 'tc', 'htb'],
     python_requires='>=3.6',
     install_requires=[],  # No external dependencies - uses stdlib ipaddress
     classifiers=[
