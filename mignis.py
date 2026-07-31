@@ -26,10 +26,12 @@ Requires: Python 3.6+
 
 import argparse
 import bisect
+import hashlib
 import json
 import os
 import pprint
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -801,7 +803,7 @@ class MignisConfigException(Exception):
 
 
 class TrafficLimit:
-    '''A traffic shaping rule applied to the egress side of an interface.'''
+    '''A traffic shaping rule applied to one side of an interface.'''
 
     RATE_MULTIPLIERS = {
         'bit': Decimal(1),
@@ -818,9 +820,11 @@ class TrafficLimit:
                  source_text: str,
                  destination_text: str,
                  rate: str,
-                 abstract: str) -> None:
+                 abstract: str,
+                 direction: str = 'egress') -> None:
         self.interface_alias = interface_alias
         self.interface = interface
+        self.direction = direction
         self.source = source
         self.destination = destination
         self.source_text = source_text
@@ -863,7 +867,7 @@ class TrafficLimit:
         return (value, value)
 
     def overlaps(self, other: 'TrafficLimit') -> bool:
-        if self.interface != other.interface:
+        if self.interface != other.interface or self.direction != other.direction:
             return False
 
         self_source = self._interval(self.source)
@@ -882,6 +886,7 @@ class TrafficLimit:
         source = self._interval(self.source)
         destination = self._interval(self.destination)
         return (
+            self.direction,
             self.interface,
             source[0],
             source[1],
@@ -891,11 +896,29 @@ class TrafficLimit:
         )
 
     def iptables_match(self) -> str:
+        if self.direction != 'egress':
+            raise MignisConfigException('Only egress traffic limits use iptables marks.')
         parts = [f'-o {self.interface}']
         if self.source is not None:
             parts.append(f'-s {self.source}')
         if self.destination is not None:
             parts.append(f'-d {self.destination}')
+        return ' '.join(parts)
+
+    @staticmethod
+    def _flower_address(address: Union[IPv4Address, IPv4Network]) -> str:
+        if isinstance(address, IPv4Address):
+            return f'{address}/32'
+        return str(address)
+
+    def flower_match(self) -> str:
+        if self.direction != 'ingress':
+            raise MignisConfigException('Only ingress traffic limits use flower selectors.')
+        parts = []
+        if self.source is not None:
+            parts.append(f'src_ip {self._flower_address(self.source)}')
+        if self.destination is not None:
+            parts.append(f'dst_ip {self._flower_address(self.destination)}')
         return ' '.join(parts)
 
 
@@ -933,7 +956,9 @@ class Mignis:
     TC_LEAF_MAJOR = 0x1e00
     TC_MARK_MASK = 0xffff0000
     TC_MARK_SHIFT = 16
-    TC_STATE_VERSION = 1
+    TC_INGRESS_FILTER_PRIORITY = 49152
+    TC_INGRESS_FILTER_HANDLE = 1
+    TC_STATE_VERSION = 2
     TC_STATE_FILE = '/run/mignis/tc-state.json'
 
     def __init__(self, config_file, debug, force, dryrun, write_rules_filename, execute_rules, flush):
@@ -1072,11 +1097,77 @@ class Mignis:
             f.write(rule + '\n')
         f.close()
 
+    def write_tc_runner(self, filename, tc_filename, output_checked=False):
+        '''Write a small runner that creates IFBs before loading a tc batch.'''
+        ingress_groups = self._traffic_groups('ingress')
+        if self.dryrun or not ingress_groups:
+            return
+
+        if not output_checked and not self.force and os.path.exists(filename):
+            raise MignisException(self, 'The file already exists, use -f to overwrite.')
+
+        with open(filename, 'w') as runner:
+            runner.write('#!/bin/sh\n\nset -eu\n\n')
+            for group in ingress_groups:
+                interface = group['interface']
+                ifb = group['device']
+                alias = self._ifb_alias(interface)
+                quoted_interface = shlex.quote(interface)
+                quoted_ifb = shlex.quote(ifb)
+                quoted_alias = shlex.quote(alias)
+                alias_path = shlex.quote(f'/sys/class/net/{ifb}/ifalias')
+
+                runner.write(
+                    f'if ip link show dev {quoted_ifb} >/dev/null 2>&1; then\n'
+                    f'    if ! ip -d link show dev {quoted_ifb} | grep -q " ifb "; then\n'
+                    f'        echo "Refusing to reuse non-IFB interface {ifb}" >&2\n'
+                    '        exit 1\n'
+                    '    fi\n'
+                    f'    if [ "$(cat {alias_path})" != {quoted_alias} ]; then\n'
+                    f'        echo "Refusing to reuse IFB {ifb} not owned by Mignis" >&2\n'
+                    '        exit 1\n'
+                    '    fi\n'
+                    'else\n'
+                    f'    ip link add name {quoted_ifb} type ifb\n'
+                    f'    ip link set dev {quoted_ifb} alias {quoted_alias}\n'
+                    'fi\n'
+                    f'ip link set dev {quoted_ifb} up\n'
+                    f'if ! tc qdisc show dev {quoted_interface} | '
+                    'grep -q "^qdisc clsact "; then\n'
+                    f'    tc qdisc add dev {quoted_interface} clsact\n'
+                    'fi\n'
+                    f'tc filter del dev {quoted_interface} ingress protocol all '
+                    f'priority {self.TC_INGRESS_FILTER_PRIORITY} '
+                    f'handle {self.TC_INGRESS_FILTER_HANDLE} matchall '
+                    '2>/dev/null || true\n\n'
+                )
+
+            for device in sorted({
+                    group['device'] for group in self._traffic_groups()}):
+                quoted_device = shlex.quote(device)
+                runner.write(
+                    f'if tc qdisc show dev {quoted_device} | '
+                    f'grep -q "^qdisc htb {self.TC_ROOT_HANDLE}"; then\n'
+                    f'    tc qdisc del dev {quoted_device} root\n'
+                    'fi\n'
+                )
+            runner.write('\n')
+
+            quoted_batch = shlex.quote(os.path.basename(tc_filename))
+            runner.write(
+                'script_directory=$(CDPATH=\'\' cd -- "$(dirname -- "$0")" && pwd)\n'
+                f'exec tc -batch "$script_directory"/{quoted_batch}\n'
+            )
+        os.chmod(filename, 0o755)
+
     def write_all_rules(self, filename):
         output_files = [filename]
         tc_filename = filename + '.tc'
+        tc_runner_filename = filename + '.tc.sh'
         if self.tc_rules:
             output_files.append(tc_filename)
+        if self._traffic_groups('ingress'):
+            output_files.append(tc_runner_filename)
 
         if not self.force:
             for output_file in output_files:
@@ -1087,38 +1178,99 @@ class Mignis:
         self.write_rules(filename, output_checked=True)
         if self.tc_rules:
             self.write_tc_rules(tc_filename, output_checked=True)
+        if self._traffic_groups('ingress'):
+            self.write_tc_runner(
+                tc_runner_filename,
+                tc_filename,
+                output_checked=True,
+            )
         return output_files
 
     def _tc_state_path(self):
         return os.environ.get('MIGNIS_TC_STATE_FILE', self.TC_STATE_FILE)
 
+    @staticmethod
+    def _empty_tc_state():
+        return {
+            'egress': set(),
+            'ingress': {},
+        }
+
+    @staticmethod
+    def _valid_tc_interface(interface):
+        return (
+            isinstance(interface, str) and
+            re.fullmatch(r'[a-zA-Z0-9_.-]{1,15}', interface) is not None
+        )
+
     def _load_tc_state(self):
         state_path = self._tc_state_path()
         if not os.path.exists(state_path):
-            return []
+            return self._empty_tc_state()
 
         try:
             with open(state_path) as state_file:
                 state = json.load(state_file)
+
+            # Version 1 tracked only egress interfaces. Accept it so upgrading
+            # does not orphan an existing Mignis HTB root.
+            if state.get('version') == 1:
+                interfaces = state.get('interfaces')
+                if not isinstance(interfaces, list):
+                    raise ValueError('invalid interface list')
+                if not all(self._valid_tc_interface(interface)
+                           for interface in interfaces):
+                    raise ValueError('invalid interface name')
+                return {
+                    'egress': set(interfaces),
+                    'ingress': {},
+                }
+
             if state.get('version') != self.TC_STATE_VERSION:
                 raise ValueError('unsupported state version')
-            interfaces = state.get('interfaces')
-            if not isinstance(interfaces, list):
-                raise ValueError('invalid interface list')
-            if not all(isinstance(interface, str) and
-                       re.fullmatch(r'[a-zA-Z0-9_.-]{1,15}', interface)
-                       for interface in interfaces):
+
+            egress_interfaces = state.get('egress')
+            ingress_interfaces = state.get('ingress')
+            if not isinstance(egress_interfaces, list):
+                raise ValueError('invalid egress interface list')
+            if not all(self._valid_tc_interface(interface)
+                       for interface in egress_interfaces):
                 raise ValueError('invalid interface name')
-            return interfaces
+
+            if not isinstance(ingress_interfaces, dict):
+                raise ValueError('invalid ingress interface map')
+            normalized_ingress = {}
+            for interface, ingress_state in ingress_interfaces.items():
+                if not self._valid_tc_interface(interface):
+                    raise ValueError('invalid ingress interface name')
+                if not isinstance(ingress_state, dict):
+                    raise ValueError('invalid ingress interface state')
+                ifb = ingress_state.get('ifb')
+                owns_clsact = ingress_state.get('owns_clsact')
+                if (not self._valid_tc_interface(ifb) or
+                        ifb != self._ifb_name(interface) or
+                        not isinstance(owns_clsact, bool)):
+                    raise ValueError('invalid ingress interface state')
+                normalized_ingress[interface] = {
+                    'ifb': ifb,
+                    'owns_clsact': owns_clsact,
+                }
+
+            return {
+                'egress': set(egress_interfaces),
+                'ingress': normalized_ingress,
+            }
         except (OSError, AttributeError, ValueError, TypeError, json.JSONDecodeError) as error:
             self.warning(f'Ignoring invalid traffic-control state "{state_path}": {error}')
-            return []
+            return self._empty_tc_state()
 
-    def _save_tc_state(self, interfaces):
+    def _save_tc_state(self, state):
         state_path = self._tc_state_path()
         state_directory = os.path.dirname(state_path) or '.'
+        egress_interfaces = set(state['egress'])
+        ingress_interfaces = state['ingress']
 
-        if not interfaces:
+        if not egress_interfaces and not ingress_interfaces:
             if os.path.exists(state_path):
                 os.unlink(state_path)
             return
@@ -1131,7 +1283,11 @@ class Mignis:
             with os.fdopen(state_fd, 'w') as state_file:
                 json.dump({
                     'version': self.TC_STATE_VERSION,
-                    'interfaces': sorted(interfaces),
+                    'egress': sorted(egress_interfaces),
+                    'ingress': {
+                        interface: ingress_interfaces[interface]
+                        for interface in sorted(ingress_interfaces)
+                    },
                 }, state_file)
                 state_file.write('\n')
             os.replace(temporary_state, state_path)
@@ -1144,21 +1300,53 @@ class Mignis:
             raise MignisException(
                 self, f'Unable to save traffic-control state "{state_path}": {error}')
 
-    def _root_qdisc(self, interface):
+    def _parse_json_command(self, command, description):
         result = self.execute(
-            ['tc', '-j', 'qdisc', 'show', 'dev', interface],
+            command,
             capture_output=True,
         )
         try:
-            qdiscs = json.loads(result.stdout)
+            parsed = json.loads(result.stdout)
         except (TypeError, ValueError, json.JSONDecodeError) as error:
             raise MignisException(
-                self, f'Unable to parse tc state for interface "{interface}": {error}')
+                self, f'Unable to parse {description}: {error}')
+        if not isinstance(parsed, list):
+            raise MignisException(self, f'Invalid JSON returned for {description}.')
+        return parsed
 
-        for qdisc in qdiscs:
+    def _qdiscs(self, interface):
+        return self._parse_json_command(
+            ['tc', '-j', 'qdisc', 'show', 'dev', interface],
+            f'tc state for interface "{interface}"',
+        )
+
+    def _root_qdisc(self, interface):
+        for qdisc in self._qdiscs(interface):
             if qdisc.get('root') is True:
                 return qdisc
         return None
+
+    def _ingress_qdisc(self, interface):
+        for qdisc in self._qdiscs(interface):
+            if qdisc.get('kind') in ('clsact', 'ingress'):
+                return qdisc
+        return None
+
+    def _link_info(self, interface):
+        links = self._parse_json_command(
+            ['ip', '-j', '-d', 'link', 'show'],
+            'network interface state',
+        )
+        for link in links:
+            if link.get('ifname') == interface:
+                return link
+        return None
+
+    def _ingress_filters(self, interface):
+        return self._parse_json_command(
+            ['tc', '-j', 'filter', 'show', 'dev', interface, 'ingress'],
+            f'ingress filters for interface "{interface}"',
+        )
 
     def _is_mignis_qdisc(self, qdisc):
         return (
@@ -1167,29 +1355,223 @@ class Mignis:
             str(qdisc.get('handle', '')).lower() == self.TC_ROOT_HANDLE
         )
 
+    def _is_mignis_ifb(self, link, interface):
+        return (
+            link is not None and
+            link.get('linkinfo', {}).get('info_kind') == 'ifb' and
+            link.get('ifalias') == self._ifb_alias(interface)
+        )
+
+    def _is_mignis_redirect(self, traffic_filter, ifb):
+        if (traffic_filter.get('pref') != self.TC_INGRESS_FILTER_PRIORITY or
+                traffic_filter.get('kind') != 'matchall'):
+            return False
+        options = traffic_filter.get('options')
+        if not isinstance(options, dict):
+            return False
+        if str(options.get('handle')) != str(self.TC_INGRESS_FILTER_HANDLE):
+            return False
+        for action in options.get('actions', []):
+            if (action.get('kind') == 'mirred' and
+                    action.get('mirred_action') == 'redirect' and
+                    action.get('direction') == 'egress' and
+                    action.get('to_dev') == ifb):
+                return True
+        return False
+
+    def _reserved_ingress_filters(self, filters):
+        return [
+            traffic_filter for traffic_filter in filters
+            if traffic_filter.get('pref') == self.TC_INGRESS_FILTER_PRIORITY
+        ]
+
+    @staticmethod
+    def _filter_redirects_to(traffic_filter, interface):
+        options = traffic_filter.get('options')
+        if not isinstance(options, dict):
+            return False
+        return any(
+            action.get('kind') == 'mirred' and
+            action.get('mirred_action') == 'redirect' and
+            action.get('to_dev') == interface
+            for action in options.get('actions', [])
+        )
+
+    def _root_qdisc_conflict(self, interface):
+        qdisc = self._root_qdisc(interface)
+        if qdisc is None or self._is_mignis_qdisc(qdisc):
+            return None
+        if qdisc.get('kind') == 'noqueue' and str(qdisc.get('handle')) == '0:':
+            return None
+        return (
+            f'{interface}: existing root qdisc '
+            f'{qdisc.get("kind", "unknown")} {qdisc.get("handle", "")}'.strip()
+        )
+
     def tc_conflicts(self):
         conflicts = []
-        for interface in sorted(self.traffic_limit_groups):
-            qdisc = self._root_qdisc(interface)
-            if qdisc is None or self._is_mignis_qdisc(qdisc):
-                continue
-            if qdisc.get('kind') == 'noqueue' and str(qdisc.get('handle')) == '0:':
-                continue
-            conflicts.append(
-                f'{interface}: existing root qdisc '
-                f'{qdisc.get("kind", "unknown")} {qdisc.get("handle", "")}'.strip())
+        for group in self._traffic_groups():
+            interface = group['interface']
+            device = group['device']
+            if group['direction'] == 'ingress':
+                link = self._link_info(device)
+                if link is not None and not self._is_mignis_ifb(link, interface):
+                    conflicts.append(
+                        f'{device}: an interface with the reserved IFB name already exists')
+                    continue
+                if link is not None:
+                    root_conflict = self._root_qdisc_conflict(device)
+                    if root_conflict:
+                        conflicts.append(root_conflict)
+
+                ingress_qdisc = self._ingress_qdisc(interface)
+                if ingress_qdisc is not None and ingress_qdisc.get('kind') != 'clsact':
+                    conflicts.append(
+                        f'{interface}: existing {ingress_qdisc.get("kind")} ingress qdisc')
+                    continue
+
+                if ingress_qdisc is not None:
+                    reserved = self._reserved_ingress_filters(
+                        self._ingress_filters(interface))
+                    detailed = [
+                        traffic_filter for traffic_filter in reserved
+                        if isinstance(traffic_filter.get('options'), dict)
+                    ]
+                    if reserved and (
+                            not detailed or
+                            not all(self._is_mignis_redirect(traffic_filter, device)
+                                    for traffic_filter in detailed)):
+                        conflicts.append(
+                            f'{interface}: ingress filter priority '
+                            f'{self.TC_INGRESS_FILTER_PRIORITY} is already in use')
+            else:
+                root_conflict = self._root_qdisc_conflict(device)
+                if root_conflict:
+                    conflicts.append(root_conflict)
         return conflicts
 
+    def _prepare_ingress(self, previous_ingress):
+        prepared = {}
+        for group in self._traffic_groups('ingress'):
+            interface = group['interface']
+            ifb = group['device']
+            previous = previous_ingress.get(interface)
+            if previous is not None and previous.get('ifb') != ifb:
+                previous = None
+
+            link = self._link_info(ifb)
+            if link is None:
+                self.execute(['ip', 'link', 'add', 'name', ifb, 'type', 'ifb'])
+                self.execute(
+                    ['ip', 'link', 'set', 'dev', ifb, 'alias',
+                     self._ifb_alias(interface)])
+            elif not self._is_mignis_ifb(link, interface):
+                raise MignisException(
+                    self,
+                    f'Refusing to reuse interface "{ifb}": it is not the '
+                    f'Mignis IFB for "{interface}".')
+            self.execute(['ip', 'link', 'set', 'dev', ifb, 'up'])
+
+            owns_clsact = (
+                previous.get('owns_clsact', False)
+                if previous is not None else False
+            )
+            ingress_qdisc = self._ingress_qdisc(interface)
+            if ingress_qdisc is not None and ingress_qdisc.get('kind') == 'ingress':
+                self.execute(['tc', 'qdisc', 'del', 'dev', interface, 'ingress'])
+                ingress_qdisc = None
+                owns_clsact = False
+            if ingress_qdisc is None:
+                self.execute(['tc', 'qdisc', 'add', 'dev', interface, 'clsact'])
+                owns_clsact = True
+
+            reserved = self._reserved_ingress_filters(
+                self._ingress_filters(interface))
+            detailed = [
+                traffic_filter for traffic_filter in reserved
+                if isinstance(traffic_filter.get('options'), dict)
+            ]
+            if detailed and all(
+                    self._is_mignis_redirect(traffic_filter, ifb)
+                    for traffic_filter in detailed):
+                # A matchall+mirred action cannot reliably be replaced in
+                # place on every iproute2/kernel combination.
+                self.execute([
+                    'tc', 'filter', 'del', 'dev', interface, 'ingress',
+                    'protocol', 'all',
+                    'priority', str(self.TC_INGRESS_FILTER_PRIORITY),
+                    'handle', str(self.TC_INGRESS_FILTER_HANDLE),
+                    'matchall',
+                ])
+            elif reserved:
+                self.execute([
+                    'tc', 'filter', 'del', 'dev', interface, 'ingress',
+                    'priority', str(self.TC_INGRESS_FILTER_PRIORITY),
+                ])
+
+            prepared[interface] = {
+                'ifb': ifb,
+                'owns_clsact': owns_clsact,
+            }
+        return prepared
+
+    def _cleanup_ingress(self, interface, ingress_state):
+        ifb = ingress_state['ifb']
+        physical_link = self._link_info(interface)
+        if physical_link is not None:
+            filters = self._ingress_filters(interface)
+            if any(self._is_mignis_redirect(traffic_filter, ifb)
+                   for traffic_filter in filters):
+                self.execute([
+                    'tc', 'filter', 'del', 'dev', interface, 'ingress',
+                    'protocol', 'all',
+                    'priority', str(self.TC_INGRESS_FILTER_PRIORITY),
+                    'handle', str(self.TC_INGRESS_FILTER_HANDLE),
+                    'matchall',
+                ])
+                filters = self._ingress_filters(interface)
+
+            if any(self._filter_redirects_to(traffic_filter, ifb)
+                   for traffic_filter in filters):
+                self.warning(
+                    f'Not removing IFB "{ifb}" because an ingress filter still '
+                    'redirects traffic to it.')
+                return False
+
+            if ingress_state.get('owns_clsact') and not filters:
+                ingress_qdisc = self._ingress_qdisc(interface)
+                if ingress_qdisc is not None and ingress_qdisc.get('kind') == 'clsact':
+                    self.execute(['tc', 'qdisc', 'del', 'dev', interface, 'clsact'])
+
+        ifb_link = self._link_info(ifb)
+        if ifb_link is None:
+            return True
+        if not self._is_mignis_ifb(ifb_link, interface):
+            self.warning(
+                f'Not removing interface "{ifb}" because it is no longer a '
+                'Mignis-owned IFB.')
+            return False
+        self.execute(['ip', 'link', 'del', 'dev', ifb])
+        return True
+
     def apply_tc_rules(self):
-        '''Apply generated tc rules and remove stale Mignis-owned qdiscs.'''
-        previous_interfaces = set(self._load_tc_state())
-        current_interfaces = set(self.traffic_limit_groups)
+        '''Apply generated tc rules and remove stale Mignis-owned state.'''
+        previous_state = self._load_tc_state()
+        current_egress = {
+            group['interface'] for group in self._traffic_groups('egress')
+        }
+        current_ingress = {}
 
         if self.tc_rules:
+            current_ingress = self._prepare_ingress(previous_state['ingress'])
+            shaping_devices = {
+                group['device'] for group in self._traffic_groups()
+            }
+
             # "tc qdisc replace" cannot change every existing root qdisc
             # in place (notably an existing HTB root). Remove only a root
             # carrying Mignis' reserved handle before rebuilding its tree.
-            for interface in sorted(current_interfaces):
+            for interface in sorted(shaping_devices):
                 qdisc = self._root_qdisc(interface)
                 if self._is_mignis_qdisc(qdisc):
                     self.execute(['tc', 'qdisc', 'del', 'dev', interface, 'root'])
@@ -1201,7 +1583,7 @@ class Mignis:
             except MignisException as error:
                 # Avoid leaving an untracked partial class tree when a later
                 # command in the batch fails.
-                for interface in sorted(current_interfaces):
+                for interface in sorted(shaping_devices):
                     try:
                         qdisc = self._root_qdisc(interface)
                         if self._is_mignis_qdisc(qdisc):
@@ -1210,6 +1592,16 @@ class Mignis:
                         self.warning(
                             f'Unable to clean partial traffic shaping on '
                             f'"{interface}": {cleanup_error}')
+                for interface in sorted(current_ingress):
+                    try:
+                        self._cleanup_ingress(
+                            interface,
+                            current_ingress[interface],
+                        )
+                    except MignisException as cleanup_error:
+                        self.warning(
+                            f'Unable to clean partial ingress shaping on '
+                            f'"{interface}": {cleanup_error}')
                 raise MignisException(
                     self,
                     str(error) +
@@ -1217,14 +1609,17 @@ class Mignis:
             else:
                 os.unlink(temp_file)
 
-        stale_interfaces_to_retry = set()
-        for interface in sorted(previous_interfaces - current_interfaces):
+        state_to_save = {
+            'egress': set(current_egress),
+            'ingress': dict(current_ingress),
+        }
+        for interface in sorted(previous_state['egress'] - current_egress):
             try:
                 qdisc = self._root_qdisc(interface)
             except MignisException as error:
                 self.warning(
                     f'Unable to inspect stale traffic shaping on "{interface}": {error}')
-                stale_interfaces_to_retry.add(interface)
+                state_to_save['egress'].add(interface)
                 continue
             if self._is_mignis_qdisc(qdisc):
                 self.execute(['tc', 'qdisc', 'del', 'dev', interface, 'root'])
@@ -1232,7 +1627,21 @@ class Mignis:
                 self.warning(
                     f'Not removing non-Mignis root qdisc from stale interface "{interface}".')
 
-        self._save_tc_state(current_interfaces | stale_interfaces_to_retry)
+        stale_ingress = (
+            set(previous_state['ingress']) - set(current_ingress)
+        )
+        for interface in sorted(stale_ingress):
+            ingress_state = previous_state['ingress'][interface]
+            try:
+                cleaned = self._cleanup_ingress(interface, ingress_state)
+            except MignisException as error:
+                self.warning(
+                    f'Unable to clean stale ingress shaping on "{interface}": {error}')
+                cleaned = False
+            if not cleaned:
+                state_to_save['ingress'][interface] = ingress_state
+
+        self._save_tc_state(state_to_save)
 
     def apply_rules(self):
         print('\n[*] Applying rules')
@@ -1247,8 +1656,7 @@ class Mignis:
             else:
                 conflicts = self.tc_conflicts()
                 for conflict in conflicts:
-                    self.warning(
-                        'Traffic shaping will replace a root qdisc: ' + conflict)
+                    self.warning('Traffic shaping conflict: ' + conflict)
                 if self.force:
                     self.test_exec_rules()
                     self.apply_tc_rules()
@@ -1324,64 +1732,102 @@ class Mignis:
             print('tc ' + rule)
         self.tc_rules.append(rule)
 
+    @staticmethod
+    def _ifb_name(interface):
+        '''Return a stable, IFNAMSIZ-safe IFB name for a physical interface.'''
+        digest = hashlib.sha256(interface.encode('utf-8')).hexdigest()[:10]
+        return 'mifb' + digest
+
+    @staticmethod
+    def _ifb_alias(interface):
+        return f'mignis-ingress:{interface}'
+
+    def _traffic_groups(self, direction=None):
+        groups = []
+        for group_key in sorted(self.traffic_limit_groups):
+            group = self.traffic_limit_groups[group_key]
+            if direction is None or group['direction'] == direction:
+                groups.append(group)
+        return groups
+
     def traffic_control_rules(self):
         '''Generate packet marks and tc HTB classes for LIMITS rules.'''
         if not self.traffic_limit_groups:
             return
 
         self.wr('\n## Traffic shaping')
-        self.add_iptables_rule(f'-t mangle -N {self.TC_CHAIN}')
-        self.add_iptables_rule(f'-t mangle -A POSTROUTING -j {self.TC_CHAIN}')
+        egress_groups = self._traffic_groups('egress')
+        if egress_groups:
+            self.add_iptables_rule(f'-t mangle -N {self.TC_CHAIN}')
+            self.add_iptables_rule(f'-t mangle -A POSTROUTING -j {self.TC_CHAIN}')
 
         # Clear only the mark bits reserved by Mignis, and only for managed
         # egress interfaces. Other fwmark users retain the lower 16 bits.
-        for interface in sorted(self.traffic_limit_groups):
+        for group in egress_groups:
+            interface = group['interface']
             self.add_iptables_rule(
                 f'-t mangle -A {self.TC_CHAIN} -o {interface} '
                 f'-j MARK --set-xmark 0x00000000/0x{self.TC_MARK_MASK:08x}')
 
-        for interface in sorted(self.traffic_limit_groups):
-            group = self.traffic_limit_groups[interface]
+        for group in self._traffic_groups():
+            direction = group['direction']
+            interface = group['interface']
+            device = group['device']
             aggregate = group['aggregate']
             flows = group['flows']
 
+            if direction == 'ingress':
+                self.add_tc_rule(
+                    f'filter replace dev {interface} ingress protocol all '
+                    f'priority {self.TC_INGRESS_FILTER_PRIORITY} '
+                    f'handle {self.TC_INGRESS_FILTER_HANDLE} matchall '
+                    f'action mirred egress redirect dev {device}')
+
             self.add_tc_rule(
-                f'qdisc replace dev {interface} root handle {self.TC_ROOT_HANDLE} '
+                f'qdisc replace dev {device} root handle {self.TC_ROOT_HANDLE} '
                 f'htb default {self.TC_DEFAULT_MINOR:x}')
             self.add_tc_rule(
-                f'class replace dev {interface} parent {self.TC_ROOT_HANDLE} '
+                f'class replace dev {device} parent {self.TC_ROOT_HANDLE} '
                 f'classid {self.TC_ROOT_MAJOR}:1 htb '
                 f'rate {aggregate.rate} ceil {aggregate.rate}')
             self.add_tc_rule(
-                f'class replace dev {interface} parent {self.TC_ROOT_MAJOR}:1 '
+                f'class replace dev {device} parent {self.TC_ROOT_MAJOR}:1 '
                 f'classid {self.TC_ROOT_MAJOR}:{self.TC_DEFAULT_MINOR:x} htb '
                 f'rate 1kbit ceil {aggregate.rate}')
             self.add_tc_rule(
-                f'qdisc replace dev {interface} parent '
+                f'qdisc replace dev {device} parent '
                 f'{self.TC_ROOT_MAJOR}:{self.TC_DEFAULT_MINOR:x} '
                 f'handle {self.TC_LEAF_MAJOR:x}: fq_codel')
 
             for index, flow_limit in enumerate(flows, start=1):
-                self.add_iptables_rule(
-                    f'-t mangle -A {self.TC_CHAIN} {flow_limit.iptables_match()} '
-                    f'-j MARK --set-xmark '
-                    f'0x{flow_limit.mark:08x}/0x{self.TC_MARK_MASK:08x}')
+                if direction == 'egress':
+                    self.add_iptables_rule(
+                        f'-t mangle -A {self.TC_CHAIN} {flow_limit.iptables_match()} '
+                        f'-j MARK --set-xmark '
+                        f'0x{flow_limit.mark:08x}/0x{self.TC_MARK_MASK:08x}')
 
                 class_minor = flow_limit.class_minor
                 leaf_major = self.TC_LEAF_MAJOR + index
                 self.add_tc_rule(
-                    f'class replace dev {interface} parent {self.TC_ROOT_MAJOR}:1 '
+                    f'class replace dev {device} parent {self.TC_ROOT_MAJOR}:1 '
                     f'classid {self.TC_ROOT_MAJOR}:{class_minor:x} htb '
                     f'rate 1kbit ceil {flow_limit.rate}')
                 self.add_tc_rule(
-                    f'qdisc replace dev {interface} parent '
+                    f'qdisc replace dev {device} parent '
                     f'{self.TC_ROOT_MAJOR}:{class_minor:x} '
                     f'handle {leaf_major:x}: fq_codel')
-                self.add_tc_rule(
-                    f'filter replace dev {interface} parent {self.TC_ROOT_HANDLE} '
-                    f'protocol ip priority 10 '
-                    f'handle 0x{flow_limit.mark:08x}/0x{self.TC_MARK_MASK:08x} '
-                    f'fw classid {self.TC_ROOT_MAJOR}:{class_minor:x}')
+                if direction == 'egress':
+                    self.add_tc_rule(
+                        f'filter replace dev {device} parent {self.TC_ROOT_HANDLE} '
+                        f'protocol ip priority 10 '
+                        f'handle 0x{flow_limit.mark:08x}/0x{self.TC_MARK_MASK:08x} '
+                        f'fw classid {self.TC_ROOT_MAJOR}:{class_minor:x}')
+                else:
+                    self.add_tc_rule(
+                        f'filter replace dev {device} parent {self.TC_ROOT_HANDLE} '
+                        f'protocol ip priority {9 + index} flower '
+                        f'{flow_limit.flower_match()} '
+                        f'classid {self.TC_ROOT_MAJOR}:{class_minor:x}')
 
         self.wr('\n##\n')
 
@@ -1868,23 +2314,29 @@ class Mignis:
         '''Parse and validate the optional LIMITS section.
 
         Syntax:
-            on INTERFACE FROM > TO RATE
+            on INTERFACE [egress|ingress] FROM > TO RATE
 
-        All limits shape egress traffic on INTERFACE. A catch-all "* > *"
-        rule is required as the aggregate interface rate when flow-specific
-        limits are present.
+        The direction defaults to egress for backward compatibility. A
+        catch-all "* > *" rule is required as the aggregate rate for every
+        shaped interface and direction.
         '''
         raw_limits = self.config_get('LIMITS', config, split=False, required=False)
         limits = []
 
         for raw_limit in raw_limits:
             parts = raw_limit.split()
-            if len(parts) != 6 or parts[0].lower() != 'on' or parts[3] != '>':
+            if len(parts) == 6 and parts[0].lower() == 'on' and parts[3] == '>':
+                direction = 'egress'
+                _, interface_alias, source_text, _, destination_text, rate = parts
+            elif (len(parts) == 7 and parts[0].lower() == 'on' and
+                  parts[2].lower() in ('egress', 'ingress') and parts[4] == '>'):
+                direction = parts[2].lower()
+                _, interface_alias, _, source_text, _, destination_text, rate = parts
+            else:
                 raise MignisConfigException(
                     f'Bad traffic limit "{raw_limit}". '
-                    'Expected: on INTERFACE FROM > TO RATE')
+                    'Expected: on INTERFACE [egress|ingress] FROM > TO RATE')
 
-            _, interface_alias, source_text, _, destination_text, rate = parts
             if interface_alias not in self.intf:
                 raise MignisConfigException(
                     f'Unknown interface alias "{interface_alias}" in traffic limit "{raw_limit}".')
@@ -1905,25 +2357,29 @@ class Mignis:
                 destination_text,
                 rate,
                 raw_limit,
+                direction,
             ))
 
         groups = {}
         for limit in limits:
-            groups.setdefault(limit.interface, []).append(limit)
+            groups.setdefault((limit.direction, limit.interface), []).append(limit)
 
         validated_limits = []
-        for interface in sorted(groups):
-            interface_limits = groups[interface]
+        ifb_interfaces = {}
+        for group_key in sorted(groups):
+            direction, interface = group_key
+            interface_limits = groups[group_key]
             aggregate_limits = [limit for limit in interface_limits if limit.is_interface_limit]
             flow_limits = [limit for limit in interface_limits if not limit.is_interface_limit]
 
             if len(aggregate_limits) != 1:
                 if not aggregate_limits:
                     raise MignisConfigException(
-                        f'Interface "{interface}" has flow-specific traffic limits but no '
-                        'aggregate "on INTERFACE * > * RATE" limit.')
+                        f'Interface "{interface}" has flow-specific {direction} traffic limits '
+                        'but no aggregate "* > *" limit in the same direction.')
                 raise MignisConfigException(
-                    f'Interface "{interface}" has more than one aggregate traffic limit.')
+                    f'Interface "{interface}" has more than one aggregate {direction} '
+                    'traffic limit.')
 
             aggregate = aggregate_limits[0]
             for flow_limit in flow_limits:
@@ -1951,9 +2407,23 @@ class Mignis:
 
             for index, flow_limit in enumerate(flow_limits):
                 flow_limit.class_minor = self.TC_FIRST_FLOW_MINOR + index
-                flow_limit.mark = flow_limit.class_minor << self.TC_MARK_SHIFT
+                if direction == 'egress':
+                    flow_limit.mark = flow_limit.class_minor << self.TC_MARK_SHIFT
 
-            groups[interface] = {
+            shaping_interface = interface
+            if direction == 'ingress':
+                shaping_interface = self._ifb_name(interface)
+                previous_interface = ifb_interfaces.get(shaping_interface)
+                if previous_interface is not None and previous_interface != interface:
+                    raise MignisConfigException(
+                        f'Unable to allocate distinct IFB interfaces for "{previous_interface}" '
+                        f'and "{interface}".')
+                ifb_interfaces[shaping_interface] = interface
+
+            groups[group_key] = {
+                'direction': direction,
+                'interface': interface,
+                'device': shaping_interface,
                 'aggregate': aggregate,
                 'flows': flow_limits,
             }
@@ -2207,7 +2677,7 @@ class Mignis:
                 # Match value when surrounded by non-alphanumeric characters (for inverse replacement)
                 self.inverse_alias_regexp[val] = re.compile(rf'(?<=[^a-zA-Z0-9\-_]){re.escape(val)}(?=[^a-zA-Z0-9\-_])')
 
-            # Read the optional egress traffic shaping rules.
+            # Read the optional traffic shaping rules.
             self.read_traffic_limits(config)
 
             # Compile the rules regexp
@@ -2255,7 +2725,7 @@ def parse_args():
     config_group = parser.add_argument_group('options for --config/-c')
     config_group = config_group.add_mutually_exclusive_group(required=False)
     config_group.add_argument('-w', '--write', dest='write_rules_filename', metavar='filename',
-                              help='write rules to file (and filename.tc when shaping)',
+                              help='write rules to file (plus .tc/.tc.sh when shaping)',
                               required=False)
     config_group.add_argument('-e', '--execute', dest='execute_rules', 
                               help='execute the rules without writing to file', required=False, 

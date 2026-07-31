@@ -103,6 +103,58 @@ on lan * > client_a 8mbit
             mignis.iptables_rules,
         )
 
+    def test_explicit_egress_direction_is_backward_compatible(self):
+        legacy, _ = self.make_mignis('''
+on ext * > * 20mbit
+on ext client_a > * 5mbit
+''')
+        explicit, _ = self.make_mignis('''
+on ext egress * > * 20mbit
+on ext egress client_a > * 5mbit
+''')
+
+        self.assertEqual(legacy.tc_rules, explicit.tc_rules)
+        legacy_marks = [rule for rule in legacy.iptables_rules if 'MIGNIS_TC' in rule]
+        explicit_marks = [rule for rule in explicit.iptables_rules if 'MIGNIS_TC' in rule]
+        self.assertEqual(legacy_marks, explicit_marks)
+
+    def test_generates_ifb_redirect_and_flower_for_ingress(self):
+        mignis, _ = self.make_mignis('''
+on lan ingress * > * 12mbit
+on lan ingress client_a > * 3mbit
+''')
+        ifb = Mignis._ifb_name('eth0')
+
+        self.assertIn(
+            f'filter replace dev eth0 ingress protocol all priority 49152 '
+            f'handle 1 matchall action mirred egress redirect dev {ifb}',
+            mignis.tc_rules,
+        )
+        self.assertIn(
+            f'qdisc replace dev {ifb} root handle 1d00: htb default 2',
+            mignis.tc_rules,
+        )
+        self.assertIn(
+            f'filter replace dev {ifb} parent 1d00: protocol ip priority 10 '
+            'flower src_ip 10.0.0.10/32 classid 1d00:10',
+            mignis.tc_rules,
+        )
+        self.assertFalse(any('MIGNIS_TC' in rule for rule in mignis.iptables_rules))
+
+    def test_same_selector_can_be_shaped_in_both_directions(self):
+        mignis, _ = self.make_mignis('''
+on lan egress * > * 20mbit
+on lan egress client_a > * 5mbit
+on lan ingress * > * 12mbit
+on lan ingress client_a > * 3mbit
+''')
+
+        self.assertEqual(2, len(mignis.traffic_limit_groups))
+        self.assertEqual(
+            {'egress', 'ingress'},
+            {limit.direction for limit in mignis.traffic_limits},
+        )
+
     def test_flow_output_is_order_independent(self):
         first, _ = self.make_mignis('''
 on ext * > * 20mbit
@@ -123,6 +175,13 @@ on ext client_b > * 8mbit
     def test_rejects_flow_limit_without_aggregate_limit(self):
         with self.assertRaisesRegex(MignisException, 'no aggregate'):
             self.make_mignis('on ext client_a > * 5mbit')
+
+    def test_aggregate_limit_is_required_in_the_same_direction(self):
+        with self.assertRaisesRegex(MignisException, 'same direction'):
+            self.make_mignis('''
+on lan egress * > * 20mbit
+on lan ingress client_a > * 3mbit
+''')
 
     def test_rejects_flow_limit_above_aggregate_limit(self):
         with self.assertRaisesRegex(MignisException, 'exceeds the aggregate'):
@@ -174,6 +233,27 @@ on ext client_a > * 5mbit
         self.assertTrue(os.path.exists(output_path + '.tc'))
         with open(output_path + '.tc') as tc_file:
             self.assertEqual(mignis.tc_rules, tc_file.read().splitlines())
+
+    def test_write_creates_ingress_setup_runner(self):
+        mignis, temporary_directory = self.make_mignis('''
+on lan ingress * > * 12mbit
+on lan ingress client_a > * 3mbit
+''')
+        output_path = os.path.join(temporary_directory, 'rules.iptables')
+        ifb = Mignis._ifb_name('eth0')
+
+        output_files = mignis.write_all_rules(output_path)
+
+        self.assertEqual(
+            [output_path, output_path + '.tc', output_path + '.tc.sh'],
+            output_files,
+        )
+        self.assertTrue(os.access(output_path + '.tc.sh', os.X_OK))
+        with open(output_path + '.tc.sh') as runner_file:
+            runner = runner_file.read()
+        self.assertIn(f'ip link add name {ifb} type ifb', runner)
+        self.assertIn('tc qdisc add dev eth0 clsact', runner)
+        self.assertIn('exec tc -batch "$script_directory"/rules.iptables.tc', runner)
 
     def test_instances_do_not_share_generated_rules(self):
         shaped, _ = self.make_mignis('on ext * > * 20mbit')

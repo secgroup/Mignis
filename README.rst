@@ -4,7 +4,7 @@ Mignis
 Mignis is a semantic based tool for firewall configuration. It is designed to help
 writing **iptables rules** using a more **human-readable syntax**,
 without restricting iptables functionalities. It can also generate Linux
-Traffic Control rules for egress bandwidth limits.
+Traffic Control rules for egress and ingress bandwidth limits.
 
 The traslation from Mignis syntax into the corresponding iptables ruleset has been
 **formally verified** in a paper published in Computer Security Foundations Symposium (CSF), 2014:
@@ -19,7 +19,8 @@ Requirements
 -  No external Python package dependencies (uses the standard library
    ``ipaddress`` module).
 -  ``iptables`` for firewall rule execution.
--  ``tc`` from ``iproute2`` when using the optional ``LIMITS`` section.
+-  ``ip`` and ``tc`` from ``iproute2`` when using the optional ``LIMITS``
+   section. Ingress shaping also requires Linux IFB support.
 
 Installation
 ~~~~~~~~~~~~
@@ -77,7 +78,7 @@ Usage
 
         options for --config/-c:
           -w filename, --write filename
-                                write rules to file (and filename.tc when shaping)
+                                write rules to file (plus .tc/.tc.sh when shaping)
           -e, --execute         execute the rules without writing to file
           -q query, --query query
                                 perform a query over the configuration (unstable)
@@ -88,7 +89,9 @@ rules and, when requested, traffic-control rules.
 Rules can either be written to files or directly applied. Without traffic
 limits, ``-w`` keeps its original behavior and writes only an
 ``iptables-restore`` file. When ``LIMITS`` is present, it also writes a
-``.tc`` sidecar suitable for ``tc -batch``.
+``.tc`` sidecar suitable for ``tc -batch``. Configurations with ingress
+limits additionally get an executable ``.tc.sh`` runner that safely creates
+the required IFB interfaces and ``clsact`` qdiscs before loading the batch.
 
 Usage example:
 
@@ -106,7 +109,10 @@ For a configuration containing bandwidth limits:
 
     ./mignis.py -c examples/ex_limits.config -w ex_limits.iptables
     iptables-restore ex_limits.iptables
-    tc -batch ex_limits.iptables.tc
+    ./ex_limits.iptables.tc.sh
+
+For an egress-only configuration, the last command can remain
+``tc -batch ex_limits.iptables.tc``.
 
 Configuration file example
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -167,13 +173,16 @@ Configuration file example
     * / *
 
     LIMITS
-    # aggregate WAN egress and upload ceiling for mypc
-    on ext * > * 100mbit
-    on ext mypc > * 10mbit
+    # aggregate WAN egress ceiling (egress is also the default direction)
+    on ext egress * > * 100mbit
+
+    # shape traffic as it enters the router from the LAN
+    on lan ingress * > * 100mbit
+    on lan ingress mypc > * 10mbit
 
     # aggregate LAN egress and download ceiling for mypc
-    on lan * > * 100mbit
-    on lan * > mypc 25mbit
+    on lan egress * > * 100mbit
+    on lan egress * > mypc 25mbit
 
     CUSTOM
     # log and accept packets on port 7792
@@ -246,34 +255,42 @@ seventh section:
    and udp packets, while we're dropping the rest (this last rule may be
    omitted, we wrote it there only for clarity).
 
--  **LIMITS**: optionally defines egress bandwidth ceilings using:
-   ``on interface from > to rate``. The interface is a Mignis interface
-   alias and is the actual egress shaping point. ``from`` and ``to`` can
-   be ``*``, an interface alias, an IP alias, an IPv4 address or an IPv4
-   subnet. The special ``local`` alias is not currently a selector; use
-   a concrete local IPv4 address instead. Rates accept ``bit``, ``kbit``,
-   ``mbit`` and ``gbit``.
+-  **LIMITS**: optionally defines bandwidth ceilings using:
+   ``on interface [egress|ingress] from > to rate``. The direction is
+   optional and defaults to ``egress``, so existing
+   ``on interface from > to rate`` rules remain valid. The interface is a
+   Mignis interface alias. ``from`` and ``to`` can be ``*``, an interface
+   alias, an IP alias, an IPv4 address or an IPv4 subnet. The special
+   ``local`` alias is not currently a selector; use a concrete local IPv4
+   address instead. Rates accept ``bit``, ``kbit``, ``mbit`` and ``gbit``.
 
-   Every shaped interface must have exactly one aggregate ``* > *``
-   limit. More specific limits become child classes and cannot exceed
-   the aggregate rate:
+   Every shaped interface and direction must have exactly one aggregate
+   ``* > *`` limit. More specific limits become child classes and cannot
+   exceed the aggregate rate:
 
    ::
 
        LIMITS
-       on ext * > * 100mbit
-       on ext mypc > * 10mbit
-       on lan * > * 100mbit
-       on lan * > mypc 25mbit
+       on ext egress * > * 100mbit
+       on lan ingress * > * 100mbit
+       on lan ingress mypc > * 10mbit
+       on lan egress * > * 100mbit
+       on lan egress * > mypc 25mbit
 
-   In this example, traffic leaving ``ext`` is capped at 100 Mbit/s and
-   traffic sourced by ``mypc`` at 10 Mbit/s. Traffic leaving ``lan`` is
-   capped at 100 Mbit/s and traffic destined for ``mypc`` at 25 Mbit/s.
-   The specific limits are ceilings, not bandwidth reservations.
+   Egress limits use HTB plus packet marks on the selected physical
+   interface. Ingress limits redirect packets from that interface to a
+   Mignis-owned IFB and apply HTB there. In the example, traffic entering
+   the router from ``lan`` is capped at 100 Mbit/s and traffic sourced by
+   ``mypc`` at 10 Mbit/s. Traffic leaving ``lan`` is capped at 100 Mbit/s
+   and traffic destined for ``mypc`` at 25 Mbit/s. The specific limits are
+   ceilings, not bandwidth reservations.
 
-   Specific selectors on the same egress interface must not overlap.
-   Mignis rejects ambiguous overlaps rather than making their meaning
-   depend on configuration order.
+   Ingress selectors see packets before routing and NAT. For example, a
+   destination selector on WAN ingress sees the public destination of a
+   DNAT flow, not the translated private address. Specific selectors on
+   the same interface and in the same direction must not overlap. Mignis
+   rejects ambiguous overlaps rather than making their meaning depend on
+   configuration order.
 
 -  **CUSTOM**: contains raw iptables rules. Note that you can also
    modify the tool's behavior here, since you can use the *-D* and *-I*
@@ -435,7 +452,9 @@ standard library:
     python3 -m unittest discover -s tests -v
 
 An end-to-end Docker laboratory routes two clients through a Mignis
-container and checks the aggregate and per-IP ceilings with ``iperf3``:
+container and checks aggregate and per-IP ceilings in both directions
+with ``iperf3``. It also verifies reapplication, direction changes and
+cleanup:
 
 .. code:: bash
 

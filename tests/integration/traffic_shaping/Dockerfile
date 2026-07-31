@@ -10,5 +10,6 @@ WORKDIR /opt/mignis
 
 COPY mignis.py ipaddr_ext.py ./
 COPY tests/integration/traffic_shaping/router.config /etc/mignis/router.config
+COPY tests/integration/traffic_shaping/router-ingress.config /etc/mignis/router-ingress.config
 
 CMD ["sleep", "infinity"]
