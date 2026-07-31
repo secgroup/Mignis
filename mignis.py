@@ -821,7 +821,7 @@ class TrafficLimit:
                  destination_text: str,
                  rate: str,
                  abstract: str,
-                 direction: str = 'egress') -> None:
+                 direction: str) -> None:
         self.interface_alias = interface_alias
         self.interface = interface
         self.direction = direction
@@ -2314,28 +2314,24 @@ class Mignis:
         '''Parse and validate the optional LIMITS section.
 
         Syntax:
-            on INTERFACE [egress|ingress] FROM > TO RATE
+            on INTERFACE (egress|ingress) FROM > TO RATE
 
-        The direction defaults to egress for backward compatibility. A
-        catch-all "* > *" rule is required as the aggregate rate for every
-        shaped interface and direction.
+        A catch-all "* > *" rule is required as the aggregate rate for
+        every shaped interface and direction.
         '''
         raw_limits = self.config_get('LIMITS', config, split=False, required=False)
         limits = []
 
         for raw_limit in raw_limits:
             parts = raw_limit.split()
-            if len(parts) == 6 and parts[0].lower() == 'on' and parts[3] == '>':
-                direction = 'egress'
-                _, interface_alias, source_text, _, destination_text, rate = parts
-            elif (len(parts) == 7 and parts[0].lower() == 'on' and
-                  parts[2].lower() in ('egress', 'ingress') and parts[4] == '>'):
+            if (len(parts) == 7 and parts[0].lower() == 'on' and
+                    parts[2].lower() in ('egress', 'ingress') and parts[4] == '>'):
                 direction = parts[2].lower()
                 _, interface_alias, _, source_text, _, destination_text, rate = parts
             else:
                 raise MignisConfigException(
                     f'Bad traffic limit "{raw_limit}". '
-                    'Expected: on INTERFACE [egress|ingress] FROM > TO RATE')
+                    'Expected: on INTERFACE (egress|ingress) FROM > TO RATE')
 
             if interface_alias not in self.intf:
                 raise MignisConfigException(

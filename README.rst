@@ -173,7 +173,7 @@ Configuration file example
     * / *
 
     LIMITS
-    # aggregate WAN egress ceiling (egress is also the default direction)
+    # aggregate WAN egress ceiling
     on ext egress * > * 100mbit
 
     # shape traffic as it enters the router from the LAN
@@ -256,13 +256,12 @@ seventh section:
    omitted, we wrote it there only for clarity).
 
 -  **LIMITS**: optionally defines bandwidth ceilings using:
-   ``on interface [egress|ingress] from > to rate``. The direction is
-   optional and defaults to ``egress``, so existing
-   ``on interface from > to rate`` rules remain valid. The interface is a
-   Mignis interface alias. ``from`` and ``to`` can be ``*``, an interface
-   alias, an IP alias, an IPv4 address or an IPv4 subnet. The special
-   ``local`` alias is not currently a selector; use a concrete local IPv4
-   address instead. Rates accept ``bit``, ``kbit``, ``mbit`` and ``gbit``.
+   ``on interface direction from > to rate``, where ``direction`` must be
+   either ``egress`` or ``ingress``. The interface is a Mignis interface
+   alias. ``from`` and ``to`` can be ``*``, an interface alias, an IP
+   alias, an IPv4 address or an IPv4 subnet. The special ``local`` alias
+   is not currently a selector; use a concrete local IPv4 address instead.
+   Rates accept ``bit``, ``kbit``, ``mbit`` and ``gbit``.
 
    Every shaped interface and direction must have exactly one aggregate
    ``* > *`` limit. More specific limits become child classes and cannot
@@ -303,24 +302,24 @@ seventh section:
 Traffic shaping behavior
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-Traffic limits currently apply to IPv4 egress traffic. Mignis uses an
-HTB hierarchy with ``fq_codel`` leaf queues. Packets are classified in
-``mangle/POSTROUTING`` before source NAT and then selected by ``tc``
-through firewall marks. The upper 16 bits of the packet mark are reserved
-for this purpose; the lower 16 bits are preserved.
+Traffic limits apply to IPv4 egress and ingress traffic. Both directions
+use an HTB hierarchy with ``fq_codel`` leaf queues. Egress packets are
+classified in ``mangle/POSTROUTING`` before source NAT and selected by
+``tc`` through firewall marks. The upper 16 bits of the packet mark are
+reserved for this purpose; the lower 16 bits are preserved. Ingress
+packets are redirected through a Mignis-owned IFB and classified with
+``flower``.
 
-Applying a shaping configuration replaces the root qdisc on each managed
-interface. Interactive execution reports an existing non-Mignis qdisc
+Ingress and egress can be enabled simultaneously, including on the same
+physical interface. Egress uses its root qdisc, while ingress uses a
+``clsact`` redirect plus the IFB root qdisc.
+
+Interactive execution reports existing non-Mignis traffic-control state
 before asking for confirmation; ``--force`` explicitly permits its
-replacement. Mignis records managed interfaces in
+replacement. Mignis records managed interfaces and IFBs in
 ``/run/mignis/tc-state.json``. Applying a later configuration without a
-previously managed interface, or running ``--flush``, removes only root
-qdiscs carrying Mignis' reserved handle.
-
-The current implementation does not shape ingress directly. Downloads
-through a router are shaped at the egress side of the destination
-interface, as in ``on lan * > mypc 25mbit``. Direct ingress shaping with
-IFB is left for a future version.
+previously managed direction, or running ``--flush``, removes only
+Mignis-owned qdiscs, redirect filters and IFBs.
 
 Firewall rules examples
 ^^^^^^^^^^^^^^^^^^^^^^^

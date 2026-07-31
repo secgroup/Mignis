@@ -67,8 +67,8 @@ class TrafficShapingTests(unittest.TestCase):
 
     def test_generates_htb_classes_and_packet_mark(self):
         mignis, _ = self.make_mignis('''
-on ext * > * 20mbit
-on ext client_a > * 5mbit
+on ext egress * > * 20mbit
+on ext egress client_a > * 5mbit
 ''')
 
         self.assertIn(
@@ -93,8 +93,8 @@ on ext client_a > * 5mbit
 
     def test_destination_limit_uses_output_interface_and_destination(self):
         mignis, _ = self.make_mignis('''
-on lan * > * 50mbit
-on lan * > client_a 8mbit
+on lan egress * > * 50mbit
+on lan egress * > client_a 8mbit
 ''')
 
         self.assertIn(
@@ -103,20 +103,11 @@ on lan * > client_a 8mbit
             mignis.iptables_rules,
         )
 
-    def test_explicit_egress_direction_is_backward_compatible(self):
-        legacy, _ = self.make_mignis('''
-on ext * > * 20mbit
-on ext client_a > * 5mbit
-''')
-        explicit, _ = self.make_mignis('''
-on ext egress * > * 20mbit
-on ext egress client_a > * 5mbit
-''')
-
-        self.assertEqual(legacy.tc_rules, explicit.tc_rules)
-        legacy_marks = [rule for rule in legacy.iptables_rules if 'MIGNIS_TC' in rule]
-        explicit_marks = [rule for rule in explicit.iptables_rules if 'MIGNIS_TC' in rule]
-        self.assertEqual(legacy_marks, explicit_marks)
+    def test_rejects_missing_direction(self):
+        with self.assertRaisesRegex(
+                MignisException,
+                r'Expected: on INTERFACE \(egress\|ingress\)'):
+            self.make_mignis('on ext * > * 20mbit')
 
     def test_generates_ifb_redirect_and_flower_for_ingress(self):
         mignis, _ = self.make_mignis('''
@@ -157,14 +148,14 @@ on lan ingress client_a > * 3mbit
 
     def test_flow_output_is_order_independent(self):
         first, _ = self.make_mignis('''
-on ext * > * 20mbit
-on ext client_b > * 8mbit
-on ext client_a > * 5mbit
+on ext egress * > * 20mbit
+on ext egress client_b > * 8mbit
+on ext egress client_a > * 5mbit
 ''')
         second, _ = self.make_mignis('''
-on ext client_a > * 5mbit
-on ext * > * 20mbit
-on ext client_b > * 8mbit
+on ext egress client_a > * 5mbit
+on ext egress * > * 20mbit
+on ext egress client_b > * 8mbit
 ''')
 
         self.assertEqual(first.tc_rules, second.tc_rules)
@@ -174,7 +165,7 @@ on ext client_b > * 8mbit
 
     def test_rejects_flow_limit_without_aggregate_limit(self):
         with self.assertRaisesRegex(MignisException, 'no aggregate'):
-            self.make_mignis('on ext client_a > * 5mbit')
+            self.make_mignis('on ext egress client_a > * 5mbit')
 
     def test_aggregate_limit_is_required_in_the_same_direction(self):
         with self.assertRaisesRegex(MignisException, 'same direction'):
@@ -186,33 +177,33 @@ on lan ingress client_a > * 3mbit
     def test_rejects_flow_limit_above_aggregate_limit(self):
         with self.assertRaisesRegex(MignisException, 'exceeds the aggregate'):
             self.make_mignis('''
-on ext * > * 5mbit
-on ext client_a > * 10mbit
+on ext egress * > * 5mbit
+on ext egress client_a > * 10mbit
 ''')
 
     def test_rejects_overlapping_flow_limits(self):
         with self.assertRaisesRegex(MignisException, 'Overlapping traffic limits'):
             self.make_mignis('''
-on ext * > * 20mbit
-on ext lan > * 10mbit
-on ext client_a > * 5mbit
+on ext egress * > * 20mbit
+on ext egress lan > * 10mbit
+on ext egress client_a > * 5mbit
 ''')
 
     def test_rejects_invalid_rate(self):
         with self.assertRaisesRegex(MignisException, 'Invalid traffic limit rate'):
-            self.make_mignis('on ext * > * 20megabits')
+            self.make_mignis('on ext egress * > * 20megabits')
 
     def test_rejects_special_local_selector(self):
         with self.assertRaisesRegex(MignisException, 'special "local" alias'):
             self.make_mignis('''
-on ext * > * 20mbit
-on ext local > * 5mbit
+on ext egress * > * 20mbit
+on ext egress local > * 5mbit
 ''')
 
     def test_tc_batch_uses_replace_for_deterministic_updates(self):
         mignis, _ = self.make_mignis('''
-on ext * > * 20mbit
-on ext client_a > * 5mbit
+on ext egress * > * 20mbit
+on ext egress client_a > * 5mbit
 ''')
 
         self.assertTrue(all(' add ' not in f' {rule} ' for rule in mignis.tc_rules))
@@ -221,8 +212,8 @@ on ext client_a > * 5mbit
 
     def test_write_creates_tc_sidecar_only_when_needed(self):
         mignis, temporary_directory = self.make_mignis('''
-on ext * > * 20mbit
-on ext client_a > * 5mbit
+on ext egress * > * 20mbit
+on ext egress client_a > * 5mbit
 ''')
         output_path = os.path.join(temporary_directory, 'rules.iptables')
 
@@ -256,7 +247,7 @@ on lan ingress client_a > * 3mbit
         self.assertIn('exec tc -batch "$script_directory"/rules.iptables.tc', runner)
 
     def test_instances_do_not_share_generated_rules(self):
-        shaped, _ = self.make_mignis('on ext * > * 20mbit')
+        shaped, _ = self.make_mignis('on ext egress * > * 20mbit')
         unshaped, _ = self.make_mignis()
 
         self.assertTrue(shaped.tc_rules)
@@ -285,8 +276,8 @@ on lan ingress client_a > * 3mbit
 
     def test_reapplication_rebuilds_existing_mignis_qdisc(self):
         mignis, temporary_directory = self.make_mignis('''
-on ext * > * 20mbit
-on ext client_a > * 5mbit
+on ext egress * > * 20mbit
+on ext egress client_a > * 5mbit
 ''')
         state_path = os.path.join(temporary_directory, 'tc-state.json')
         executed = []
